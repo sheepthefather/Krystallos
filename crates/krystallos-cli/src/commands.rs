@@ -1,7 +1,7 @@
 ﻿use crate::format::{entry_line, human_bytes, metadata_block};
 use krystallos_core::{
-    BackendRegistry, ConnectionOptions, Credentials, Error, OpenMode, Result, StorageBackend,
-    VfsPath,
+    BackendRegistry, ConnectionOptions, Credentials, Error, FileHandle, OpenMode, Result,
+    StorageBackend, VfsPath,
 };
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
@@ -78,15 +78,17 @@ pub async fn cat(
     options: &ConnectionOptions,
     uri: &str,
     path: &str,
+    read_ahead: usize,
+    chunk: usize,
 ) -> Result<()> {
     let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         let path = parse(path)?;
-        let handle = open_for_read(backend.as_ref(), &path).await?;
+        let handle = open_for_read(backend.as_ref(), &path, read_ahead).await?;
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        let mut buf = vec![0u8; CHUNK];
+        let mut buf = vec![0u8; chunk];
         let mut offset = 0u64;
         loop {
             let n = handle.read_at(offset, &mut buf).await?;
@@ -111,16 +113,18 @@ pub async fn get(
     uri: &str,
     path: &str,
     dest: &Path,
+    read_ahead: usize,
+    chunk: usize,
 ) -> Result<()> {
     let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         let path = parse(path)?;
-        let handle = open_for_read(backend.as_ref(), &path).await?;
+        let handle = open_for_read(backend.as_ref(), &path, read_ahead).await?;
         // Only for the progress line; the loop below does not depend on it.
         let expected = handle.len();
 
         let mut file = std::fs::File::create(dest)?;
-        let mut buf = vec![0u8; CHUNK];
+        let mut buf = vec![0u8; chunk];
         let mut offset = 0u64;
         // Transfer statistics, reported under KRYSTALLOS_DEBUG. The number of
         // read calls and their sizes say immediately whether a slow transfer is
@@ -290,22 +294,87 @@ pub async fn mv(
     finish(backend, outcome).await
 }
 
-/// Open a file for reading, rejecting a directory up front.
+/// Wrap a read handle in read-ahead when the caller asked for it.
 ///
-/// Without this the failure would come from the backend as whatever its
-/// "cannot open a directory" error happens to be, which is less clear than
-/// saying so here.
-async fn open_for_read(
-    backend: &dyn StorageBackend,
-    path: &VfsPath,
-) -> Result<Box<dyn krystallos_core::FileHandle>> {
-    let meta = backend.stat(path).await?;
-    if meta.is_dir() {
-        return Err(Error::IsADirectory {
-            path: path.to_string(),
-        });
+/// Read-ahead is a latency optimisation, not a throughput one, so whether it
+/// helps depends entirely on the access pattern — which is exactly why it is a
+/// flag rather than always-on. `--read-ahead 0` is the way to measure the
+/// baseline it is being compared against.
+///
+/// Returns a concrete enum rather than `Box<dyn FileHandle>` because
+/// `ReadAhead<H>` is generic over the handle it wraps, and the backend hands
+/// back a trait object. Boxing twice would work but would mean a second
+/// allocation and a second vtable on the read path — and this is the read path.
+fn open_for_read<'a>(
+    backend: &'a dyn StorageBackend,
+    path: &'a VfsPath,
+    read_ahead: usize,
+) -> impl std::future::Future<Output = Result<ReadHandle<'a>>> + 'a {
+    async move {
+        let meta = backend.stat(path).await?;
+        if meta.is_dir() {
+            return Err(Error::IsADirectory {
+                path: path.to_string(),
+            });
+        }
+        let handle = backend.open(path, OpenMode::read()).await?;
+        Ok(if read_ahead > 0 {
+            ReadHandle::Buffered(krystallos_cache::ReadAhead::with_window(
+                handle, read_ahead,
+            ))
+        } else {
+            ReadHandle::Plain(handle)
+        })
     }
-    backend.open(path, OpenMode::read()).await
+}
+
+/// A read handle, with or without read-ahead in front of it.
+///
+/// The two variants exist only to keep the type nameable; every call site goes
+/// through `FileHandle`.
+enum ReadHandle<'a> {
+    Plain(Box<dyn krystallos_core::FileHandle + 'a>),
+    Buffered(krystallos_cache::ReadAhead<Box<dyn krystallos_core::FileHandle + 'a>>),
+}
+
+#[async_trait::async_trait]
+impl krystallos_core::FileHandle for ReadHandle<'_> {
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        match self {
+            ReadHandle::Plain(h) => h.read_at(offset, buf).await,
+            ReadHandle::Buffered(h) => h.read_at(offset, buf).await,
+        }
+    }
+    async fn write_at(&self, offset: u64, buf: &[u8]) -> Result<usize> {
+        match self {
+            ReadHandle::Plain(h) => h.write_at(offset, buf).await,
+            ReadHandle::Buffered(h) => h.write_at(offset, buf).await,
+        }
+    }
+    async fn set_len(&self, len: u64) -> Result<()> {
+        match self {
+            ReadHandle::Plain(h) => h.set_len(len).await,
+            ReadHandle::Buffered(h) => h.set_len(len).await,
+        }
+    }
+    async fn flush(&self) -> Result<()> {
+        match self {
+            ReadHandle::Plain(h) => h.flush().await,
+            ReadHandle::Buffered(h) => h.flush().await,
+        }
+    }
+    async fn close(&self) -> Result<()> {
+        match self {
+            ReadHandle::Plain(h) => h.close().await,
+            ReadHandle::Buffered(h) => h.close().await,
+        }
+    }
+    fn len(&self) -> u64 {
+        match self {
+            ReadHandle::Plain(h) => h.len(),
+            ReadHandle::Buffered(h) => h.len(),
+        }
+    }
 }
 
 /// Live progress, but only when a human is watching.

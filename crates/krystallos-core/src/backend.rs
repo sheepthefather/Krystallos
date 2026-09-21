@@ -178,6 +178,41 @@ pub trait FileHandle: Send + Sync {
     }
 }
 
+/// Forwarding impl so a boxed handle is itself a handle.
+///
+/// Without this, anything generic over `H: FileHandle` cannot be handed a
+/// `Box<dyn FileHandle>` — which is exactly what every backend returns from
+/// `open`. It is the difference between a decorator like a read-ahead buffer
+/// being usable on a backend's output and being usable only on a concrete type.
+///
+/// `?Sized` is what makes it cover `dyn FileHandle` as well as concrete types.
+#[async_trait]
+impl<H: FileHandle + ?Sized> FileHandle for Box<H> {
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        (**self).read_at(offset, buf).await
+    }
+
+    async fn write_at(&self, offset: u64, buf: &[u8]) -> Result<usize> {
+        (**self).write_at(offset, buf).await
+    }
+
+    async fn set_len(&self, len: u64) -> Result<()> {
+        (**self).set_len(len).await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        (**self).flush().await
+    }
+
+    async fn close(&self) -> Result<()> {
+        (**self).close().await
+    }
+
+    fn len(&self) -> u64 {
+        (**self).len()
+    }
+}
+
 /// A connected storage backend.
 ///
 /// One instance represents one live session against one endpoint. Backends are

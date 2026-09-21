@@ -17,10 +17,8 @@ Krystallos 把远程存储呈现为一套类似本地文件系统的接口：连
 | M3 | `krystallos-local` + `krystallos-cli` | ✅ |
 | M4 | SMB 连接、列举、stat、目录操作 | ✅ |
 | M5 | SMB 文件读写 | ✅ |
+| M6 | 预读缓存 | ✅ |
 | M7 | UniFFI 门面 + Kotlin 绑定生成 | ✅ |
-| M6 | 预读缓存 | ⬜ 待按真实负载设计 |
-
-M6 被有意押后：原计划做预读是为了掩盖延迟，但实测显示未加密路径已有约 250 MB/s、每次读 4 ms，收益不足以支撑它的复杂度。等真有播放器负载时再按需设计。
 
 ## 快速开始
 
@@ -120,7 +118,7 @@ crates/
 ├── krystallos-smb/        SMB2/3 后端（actor 线程）
 ├── krystallos-sys-smb2/   libsmb2 的 FFI 声明与构建
 ├── krystallos-cache/      预读窗口
-├── krystallos-ffi/        对外门面（cdylib）
+├── krystallos-ffi/        对外门面（cdylib）+ Kotlin 绑定生成
 └── krystallos-cli/        主机端调试 CLI
 vendor/libsmb2/            git submodule，锁定 commit
 ```

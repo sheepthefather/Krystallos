@@ -1,4 +1,4 @@
-//! Debug CLI for the Krystallos kernel.
+﻿//! Debug CLI for the Krystallos kernel.
 //!
 //! This exists so that backend work can be driven and inspected on the host,
 //! without an emulator, an APK build, or a device. Everything a backend can do
@@ -6,7 +6,7 @@
 //! SMB layer: if a behaviour cannot be exercised through this CLI, it is
 //! effectively untestable until the Android side exists.
 //!
-//! It is also what makes the differential test possible — `krystallos get`
+//! It is also what makes the differential test possible —`krystallos get`
 //! against a `file://` URI and against an `smb://` URI must produce byte-
 //! identical output for the same file.
 
@@ -51,6 +51,26 @@ struct Cli {
     /// right trade.
     #[arg(long, global = true, env = "KRYSTALLOS_SMB_SEAL")]
     smb_seal: bool,
+
+    /// Read-ahead window size in bytes for `cat` and `get`. 0 disables it.
+    ///
+    /// Read-ahead trades memory for latency, not throughput: it does not make
+    /// the network faster, it just means a sequential read usually does not pay
+    /// a round-trip per request. Whether that helps depends on the access
+    /// pattern, so it is a flag rather than always-on —and 0 is how you measure
+    /// the baseline it is being compared against.
+    #[arg(long, global = true, default_value_t = 1024 * 1024, value_name = "BYTES")]
+    read_ahead: usize,
+
+    /// How many bytes `cat` and `get` ask for per read.
+    ///
+    /// Separate from `--read-ahead` because the two interact, and that
+    /// interaction is the whole story: read-ahead only helps when the caller
+    /// reads *smaller* than the window. A media player reads a few tens of
+    /// kilobytes at a time, so this defaults to something closer to that than
+    /// to the window size.
+    #[arg(long, global = true, default_value_t = 64 * 1024, value_name = "BYTES")]
+    chunk: usize,
 
     #[command(subcommand)]
     command: Command,
@@ -172,9 +192,11 @@ async fn run(
         }
         Command::Ls { uri, path } => commands::ls(&reg, &credentials, &options, &uri, &path).await,
         Command::Stat { uri, path } => commands::stat(&reg, &credentials, &options, &uri, &path).await,
-        Command::Cat { uri, path } => commands::cat(&reg, &credentials, &options, &uri, &path).await,
+        Command::Cat { uri, path } => {
+            commands::cat(&reg, &credentials, &options, &uri, &path, cli.read_ahead, cli.chunk).await
+        }
         Command::Get { uri, path, dest } => {
-            commands::get(&reg, &credentials, &options, &uri, &path, &dest).await
+            commands::get(&reg, &credentials, &options, &uri, &path, &dest, cli.read_ahead, cli.chunk).await
         }
         Command::Put { uri, path, src } => {
             commands::put(&reg, &credentials, &options, &uri, &path, &src).await

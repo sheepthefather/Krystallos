@@ -16,6 +16,8 @@ path = "src/main.rs"
 krystallos-core.workspace = true
 krystallos-local.workspace = true
 krystallos-smb = { path = "../krystallos-smb" }
+krystallos-cache = { path = "../krystallos-cache" }
+async-trait.workspace = true
 tokio.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 humantime = "2"
