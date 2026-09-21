@@ -58,12 +58,31 @@ fn registry() -> BackendRegistry {
     reg
 }
 
+/// Serialises every test in this file.
+///
+/// They all share one fixture directory, and `cargo test` runs tests in
+/// parallel by default. A test that creates or renames a directory while
+/// another is enumerating the same directory makes the comparison fail for a
+/// reason that has nothing to do with either backend. That is not hypothetical:
+/// it is what this file did before the lock existed, intermittently.
+///
+/// An intermittently failing test is worse than no test. It teaches people to
+/// re-run until it passes, which is how a genuine failure eventually gets
+/// ignored. The whole file runs in hundredths of a second, so serialising costs
+/// nothing worth measuring.
+fn fixture_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+    &LOCK
+}
+
 fn p(s: &str) -> VfsPath {
     VfsPath::new(s).expect("test path should be valid")
 }
 
 #[tokio::test]
 async fn connects_lists_and_stats() {
+    let _guard = fixture_lock().lock().await;
     let live = require_share!();
     let backend = registry()
         .connect(&live.uri, &live.credentials)
@@ -77,12 +96,12 @@ async fn connects_lists_and_stats() {
     );
 
     // Every entry must carry metadata, because that is what makes the listing
-    // a single round-trip rather than N+1 — the whole reason `Entry` bundles
-    // the two.
+    // a single round-trip rather than N+1, which is the whole reason `Entry`
+    // bundles the two.
     for entry in &root {
         assert!(!entry.name.is_empty());
         assert!(
-            entry.metadata.is_dir() || entry.metadata.len > 0 || entry.metadata.is_file(),
+            entry.metadata.is_dir() || entry.metadata.is_file(),
             "entry {} has no usable metadata",
             entry.name
         );
@@ -102,13 +121,14 @@ async fn connects_lists_and_stats() {
 
 #[tokio::test]
 async fn directory_operations_round_trip() {
+    let _guard = fixture_lock().lock().await;
     let live = require_share!();
     let backend = registry()
         .connect(&live.uri, &live.credentials)
         .await
         .expect("connect");
 
-    // A unique name so concurrent runs and leftovers cannot collide.
+    // A unique name so leftovers from an aborted run cannot collide.
     let name = format!("/krystallos-test-{}", std::process::id());
     let created = p(&name);
     let renamed = p(&format!("{name}-moved"));
@@ -124,7 +144,10 @@ async fn directory_operations_round_trip() {
     // Creating it again must be reported as a collision, not as a generic
     // failure. libsmb2 only puts the status name in the message for this path,
     // so it exercises the message-parsing channel of the error mapper.
-    let err = backend.mkdir(&created).await.expect_err("second mkdir must fail");
+    let err = match backend.mkdir(&created).await {
+        Ok(()) => panic!("a second mkdir must not succeed"),
+        Err(e) => e,
+    };
     assert!(
         matches!(err, krystallos_core::Error::AlreadyExists { .. }),
         "expected AlreadyExists, got {err:?}"
@@ -148,6 +171,7 @@ async fn directory_operations_round_trip() {
 
 #[tokio::test]
 async fn failures_are_classified_not_merely_reported() {
+    let _guard = fixture_lock().lock().await;
     let live = require_share!();
     let backend = registry()
         .connect(&live.uri, &live.credentials)
@@ -180,6 +204,7 @@ async fn failures_are_classified_not_merely_reported() {
 
 #[tokio::test]
 async fn a_bad_password_is_reported_as_authentication_not_as_a_network_fault() {
+    let _guard = fixture_lock().lock().await;
     let live = require_share!();
     // Only meaningful when the share actually requires credentials.
     if live.credentials.username.is_none() {
@@ -193,12 +218,17 @@ async fn a_bad_password_is_reported_as_authentication_not_as_a_network_fault() {
         domain: live.credentials.domain.clone(),
     };
 
-    // `expect_err` would need `Box<dyn StorageBackend>: Debug`, which it is not.
+    // Not `expect_err`: that would need `Box<dyn StorageBackend>: Debug`, which
+    // a trait object is not.
     let err = match registry().connect(&live.uri, &wrong).await {
         Ok(_) => panic!("connecting with a bad password must fail"),
         Err(e) => e,
     };
 
+    // The status channel is definitive here, but libsmb2's own description is a
+    // later symptom (the socket being torn down). If that text came through
+    // bare, the reader would go and debug their network instead of their
+    // password.
     assert!(
         matches!(err, krystallos_core::Error::Auth { .. }),
         "expected Auth, got {err:?}"
@@ -207,6 +237,7 @@ async fn a_bad_password_is_reported_as_authentication_not_as_a_network_fault() {
 
 #[tokio::test]
 async fn the_two_backends_agree_on_the_same_directory() {
+    let _guard = fixture_lock().lock().await;
     let live = require_share!();
     let Some(local_uri) = std::env::var("KRYSTALLOS_TEST_LOCAL_URI").ok() else {
         eprintln!("skipped: KRYSTALLOS_TEST_LOCAL_URI is not set");
@@ -230,7 +261,7 @@ async fn the_two_backends_agree_on_the_same_directory() {
 }
 
 /// Compare two listings, reporting every disagreement rather than stopping at
-/// the first — a diff is far more useful than a single mismatched line.
+/// the first. A full diff is far more useful than a single mismatched line.
 fn compare(a: &[Entry], b: &[Entry]) {
     let names = |v: &[Entry]| v.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
     assert_eq!(
@@ -274,6 +305,7 @@ fn compare(a: &[Entry], b: &[Entry]) {
 
 #[tokio::test]
 async fn opening_a_file_is_reported_as_unimplemented_rather_than_faked() {
+    let _guard = fixture_lock().lock().await;
     // Until the file-handle lifetime design lands, `open` must say so. A stub
     // that returned a handle would fail later and less clearly.
     let live = require_share!();
