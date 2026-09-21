@@ -4,7 +4,7 @@
 
 Krystallos 把远程存储呈现为一套类似本地文件系统的接口：连接、列举目录、随机读写。首个支持的协议是 SMB2/3，架构上为 SFTP / WebDAV / NFS / FTP 预留了扩展位。
 
-它是 Android 局域网媒体播放器 [HyalosPlayer](https://github.com/float-world/Hyalos-Player) 的网络能力底座，但**不依赖 Android**——全部功能都能在桌面主机上通过 CLI 驱动和测试，不需要模拟器、不需要真机。
+它是 Android 局域网媒体播放器 [HyalosPlayer](https://github.com/sheepthefather/Hyalos-Player) 的网络能力底座，但**不依赖 Android**——全部功能都能在桌面主机上通过 CLI 驱动和测试，不需要模拟器、不需要真机。
 
 ## 当前状态
 
@@ -23,7 +23,7 @@ Krystallos 把远程存储呈现为一套类似本地文件系统的接口：连
 ## 快速开始
 
 ```bash
-git clone --recursive https://github.com/float-world/Krystallos.git
+git clone --recursive https://github.com/sheepthefather/Krystallos.git
 cd Krystallos
 cargo test --workspace
 ```

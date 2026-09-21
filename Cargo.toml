@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/float-world/Krystallos"
+repository = "https://github.com/sheepthefather/Krystallos"
 authors = ["float_world"]
 
 [workspace.dependencies]
