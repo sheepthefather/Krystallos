@@ -1,0 +1,16 @@
+[package]
+name = "krystallos-ffi"
+description = "FFI facade for the Krystallos kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+krystallos-core.workspace = true
+krystallos-sys-smb2 = { path = "../krystallos-sys-smb2" }

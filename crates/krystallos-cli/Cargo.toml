@@ -1,0 +1,20 @@
+[package]
+name = "krystallos-cli"
+description = "Debug CLI for the Krystallos kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "krystallos"
+path = "src/main.rs"
+
+[dependencies]
+krystallos-core.workspace = true
+krystallos-local.workspace = true
+tokio.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+humantime = "2"

@@ -1,0 +1,17 @@
+[package]
+name = "krystallos-sys-smb2"
+description = "Raw FFI declarations and vendored build for libsmb2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+links = "smb2"
+build = "build.rs"
+
+[dependencies]
+
+[build-dependencies]
+cmake = "0.1"
+dunce = "1"

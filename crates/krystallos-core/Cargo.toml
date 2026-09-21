@@ -1,0 +1,16 @@
+[package]
+name = "krystallos-core"
+description = "Protocol-neutral storage abstraction for the Krystallos kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
