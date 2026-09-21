@@ -1,6 +1,64 @@
 use crate::{Error, Result, StorageBackend};
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+/// Per-connection settings that are neither credentials nor part of the URI.
+///
+/// This exists because some settings are genuinely the caller's business and
+/// belong in neither of the obvious places. SMB3 encryption is the motivating
+/// case: it is requested per connection, it is not a credential, and it cannot
+/// sensibly be spelled into a share path.
+///
+/// Keys are namespaced by protocol so that a caller configuring several
+/// backends cannot have one protocol's setting silently apply to another. A key
+/// a backend does not recognise is ignored — the alternative, failing, would
+/// make every option a breaking change.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConnectionOptions {
+    settings: BTreeMap<String, String>,
+}
+
+impl ConnectionOptions {
+    pub fn new() -> Self {
+        ConnectionOptions::default()
+    }
+
+    pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) -> &mut Self {
+        self.settings.insert(key.into(), value.into());
+        self
+    }
+
+    /// Builder form, for use where the options are assembled inline.
+    pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.set(key, value);
+        self
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.settings.get(key).map(String::as_str)
+    }
+
+    /// Read a boolean setting.
+    ///
+    /// Returns `None` when the key is absent, and also when its value is not a
+    /// recognised boolean — a typo must not be silently read as `false` for a
+    /// setting whose whole point is to turn something on.
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        match self.get(key)?.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.settings.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+}
 
 /// Credentials for a connection attempt.
 ///
@@ -139,6 +197,7 @@ pub trait BackendDriver: Send + Sync {
         &self,
         endpoint: &Endpoint,
         credentials: &Credentials,
+        options: &ConnectionOptions,
     ) -> Result<Box<dyn StorageBackend>>;
 }
 
@@ -190,13 +249,24 @@ impl BackendRegistry {
         uri: &str,
         credentials: &Credentials,
     ) -> Result<Box<dyn StorageBackend>> {
+        self.connect_with(uri, credentials, &ConnectionOptions::new())
+            .await
+    }
+
+    /// Connect with protocol-specific settings.
+    pub async fn connect_with(
+        &self,
+        uri: &str,
+        credentials: &Credentials,
+        options: &ConnectionOptions,
+    ) -> Result<Box<dyn StorageBackend>> {
         let endpoint = Endpoint::parse(uri)?;
         let Some(driver) = self.drivers.get(endpoint.scheme()) else {
             return Err(Error::Unsupported {
                 operation: "connect: no driver registered for this scheme",
             });
         };
-        driver.connect(&endpoint, credentials).await
+        driver.connect(&endpoint, credentials, options).await
     }
 }
 
@@ -258,6 +328,7 @@ mod tests {
                 &self,
                 _e: &Endpoint,
                 _c: &Credentials,
+                _o: &ConnectionOptions,
             ) -> Result<Box<dyn StorageBackend>> {
                 Err(Error::Unsupported { operation: "test" })
             }
@@ -285,6 +356,7 @@ mod tests {
                 &self,
                 _e: &Endpoint,
                 _c: &Credentials,
+                _o: &ConnectionOptions,
             ) -> Result<Box<dyn StorageBackend>> {
                 Err(Error::Unsupported { operation: "test" })
             }

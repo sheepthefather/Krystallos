@@ -63,6 +63,18 @@ cargo run -p krystallos-cli -- mkdir smb://nas.local/media /new-folder
 cargo run -p krystallos-cli -- mv   smb://nas.local/media /a.mkv /b.mkv
 ```
 
+### 关于 SMB3 加密
+
+`--smb-seal` 请求 SMB3 传输加密，**默认关闭**。
+
+libsmb2 在除 Apple 外的所有平台（含 Android）都使用自带的参考版 AES 实现，开启加密会让读吞吐从约 280 MB/s 降到约 3 MB/s——实测相差 96 倍。在不受信任的网络上打开它是对的取舍；在自家局域网里默认关闭。
+
+```bash
+KRYSTALLOS_PASSWORD=... cargo run -p krystallos-cli -- --smb-seal ls smb://nas.local/media
+```
+
+细节与实测数据见 [ARCHITECTURE.md](ARCHITECTURE.md#加密的代价约-96-倍吞吐因此默认关闭)。
+
 ## 构建到 Android
 
 需要 NDK 与 cargo-ndk：

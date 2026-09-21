@@ -2,9 +2,23 @@ use crate::actor::{ConnectConfig, Session};
 use crate::DEFAULT_TIMEOUT_SECS;
 use async_trait::async_trait;
 use krystallos_core::{
-    BackendDriver, Capabilities, Credentials, Endpoint, Entry, Error, FileHandle, Metadata,
-    OpenMode, Result, StorageBackend, VfsPath,
+    BackendDriver, Capabilities, ConnectionOptions, Credentials, Endpoint, Entry, Error,
+    FileHandle, Metadata, OpenMode, Result, StorageBackend, VfsPath,
 };
+
+/// Connection option: request SMB3 transport encryption.
+///
+/// **Defaults to off, and that default is deliberate.** libsmb2 implements AES
+/// with its own portable reference code on every platform except Apple
+/// (`lib/aes.c:24-35`), including Android. Measured against a real Windows
+/// share, enabling encryption dropped a read from hundreds of megabytes per
+/// second to under four, with a core pinned at 97%. The same code path runs on
+/// Android, so the cost would ship.
+///
+/// It is kept as an option rather than removed because on an untrusted network
+/// that trade is the right way round — a slow transfer beats a readable one.
+/// Set `smb.seal` to `true` to enable it.
+pub const OPT_SEAL: &str = "smb.seal";
 
 /// An SMB endpoint split into its parts.
 ///
@@ -155,6 +169,7 @@ impl BackendDriver for SmbDriver {
         &self,
         endpoint: &Endpoint,
         credentials: &Credentials,
+        options: &ConnectionOptions,
     ) -> Result<Box<dyn StorageBackend>> {
         let parsed = ParsedEndpoint::parse(endpoint.authority_and_path())?;
 
@@ -170,10 +185,9 @@ impl BackendDriver for SmbDriver {
                 .or_else(|| parsed.user.clone()),
             password: credentials.password.clone(),
             domain: credentials.domain.clone().or_else(|| parsed.domain.clone()),
-            // SMB3 encryption is requested when the caller supplied a password.
-            // Asking for it with no credentials would fail the handshake on
-            // servers that then require it.
-            seal: credentials.password.is_some(),
+            // Off unless asked for. See `OPT_SEAL` for why that is the default
+            // and what it costs to change.
+            seal: options.get_bool(OPT_SEAL).unwrap_or(false),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             label: parsed.label(),
         };

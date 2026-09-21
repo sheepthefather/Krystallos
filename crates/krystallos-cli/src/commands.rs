@@ -1,6 +1,7 @@
 ﻿use crate::format::{entry_line, human_bytes, metadata_block};
 use krystallos_core::{
-    BackendRegistry, Credentials, Error, OpenMode, Result, StorageBackend, VfsPath,
+    BackendRegistry, ConnectionOptions, Credentials, Error, OpenMode, Result, StorageBackend,
+    VfsPath,
 };
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
@@ -30,10 +31,11 @@ fn parse(path: &str) -> Result<VfsPath> {
 pub async fn ls(
     reg: &BackendRegistry,
     creds: &Credentials,
+    options: &ConnectionOptions,
     uri: &str,
     path: &str,
 ) -> Result<()> {
-    let backend = reg.connect(uri, creds).await?;
+    let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         let path = parse(path)?;
         let entries = backend.list(&path).await?;
@@ -52,10 +54,11 @@ pub async fn ls(
 pub async fn stat(
     reg: &BackendRegistry,
     creds: &Credentials,
+    options: &ConnectionOptions,
     uri: &str,
     path: &str,
 ) -> Result<()> {
-    let backend = reg.connect(uri, creds).await?;
+    let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         let path = parse(path)?;
         let meta = backend.stat(&path).await?;
@@ -72,10 +75,11 @@ pub async fn stat(
 pub async fn cat(
     reg: &BackendRegistry,
     creds: &Credentials,
+    options: &ConnectionOptions,
     uri: &str,
     path: &str,
 ) -> Result<()> {
-    let backend = reg.connect(uri, creds).await?;
+    let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         let path = parse(path)?;
         let handle = open_for_read(backend.as_ref(), &path).await?;
@@ -103,11 +107,12 @@ pub async fn cat(
 pub async fn get(
     reg: &BackendRegistry,
     creds: &Credentials,
+    options: &ConnectionOptions,
     uri: &str,
     path: &str,
     dest: &Path,
 ) -> Result<()> {
-    let backend = reg.connect(uri, creds).await?;
+    let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         let path = parse(path)?;
         let handle = open_for_read(backend.as_ref(), &path).await?;
@@ -167,11 +172,12 @@ pub async fn get(
 pub async fn put(
     reg: &BackendRegistry,
     creds: &Credentials,
+    options: &ConnectionOptions,
     uri: &str,
     path: &str,
     src: &Path,
 ) -> Result<()> {
-    let backend = reg.connect(uri, creds).await?;
+    let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         let path = parse(path)?;
         let mut file = std::fs::File::open(src)?;
@@ -222,10 +228,11 @@ pub async fn put(
 pub async fn mkdir(
     reg: &BackendRegistry,
     creds: &Credentials,
+    options: &ConnectionOptions,
     uri: &str,
     path: &str,
 ) -> Result<()> {
-    let backend = reg.connect(uri, creds).await?;
+    let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         backend.mkdir(&parse(path)?).await?;
         Ok(())
@@ -234,8 +241,14 @@ pub async fn mkdir(
     finish(backend, outcome).await
 }
 
-pub async fn rm(reg: &BackendRegistry, creds: &Credentials, uri: &str, path: &str) -> Result<()> {
-    let backend = reg.connect(uri, creds).await?;
+pub async fn rm(
+    reg: &BackendRegistry,
+    creds: &Credentials,
+    options: &ConnectionOptions,
+    uri: &str,
+    path: &str,
+) -> Result<()> {
+    let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         backend.remove_file(&parse(path)?).await?;
         Ok(())
@@ -244,8 +257,14 @@ pub async fn rm(reg: &BackendRegistry, creds: &Credentials, uri: &str, path: &st
     finish(backend, outcome).await
 }
 
-pub async fn rmdir(reg: &BackendRegistry, creds: &Credentials, uri: &str, path: &str) -> Result<()> {
-    let backend = reg.connect(uri, creds).await?;
+pub async fn rmdir(
+    reg: &BackendRegistry,
+    creds: &Credentials,
+    options: &ConnectionOptions,
+    uri: &str,
+    path: &str,
+) -> Result<()> {
+    let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         backend.remove_dir(&parse(path)?).await?;
         Ok(())
@@ -257,11 +276,12 @@ pub async fn rmdir(reg: &BackendRegistry, creds: &Credentials, uri: &str, path: 
 pub async fn mv(
     reg: &BackendRegistry,
     creds: &Credentials,
+    options: &ConnectionOptions,
     uri: &str,
     from: &str,
     to: &str,
 ) -> Result<()> {
-    let backend = reg.connect(uri, creds).await?;
+    let backend = reg.connect_with(uri, creds, options).await?;
     let outcome = async {
         backend.rename(&parse(from)?, &parse(to)?).await?;
         Ok(())

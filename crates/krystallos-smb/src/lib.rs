@@ -46,7 +46,7 @@ mod error;
 mod file;
 mod path;
 
-pub use backend::{SmbBackend, SmbDriver};
+pub use backend::{SmbBackend, SmbDriver, OPT_SEAL};
 pub use file::RemoteFile;
 
 /// Default per-operation timeout, in seconds.

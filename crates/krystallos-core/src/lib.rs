@@ -43,4 +43,4 @@ pub use capabilities::Capabilities;
 pub use entry::{Entry, EntryKind, Metadata};
 pub use error::{Error, Result};
 pub use path::VfsPath;
-pub use registry::{BackendDriver, BackendRegistry, Credentials, Endpoint};
+pub use registry::{BackendDriver, BackendRegistry, ConnectionOptions, Credentials, Endpoint};

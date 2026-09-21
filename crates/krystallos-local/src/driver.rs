@@ -1,6 +1,8 @@
 use crate::backend::LocalBackend;
 use async_trait::async_trait;
-use krystallos_core::{BackendDriver, Credentials, Endpoint, Error, Result, StorageBackend};
+use krystallos_core::{
+    BackendDriver, ConnectionOptions, Credentials, Endpoint, Error, Result, StorageBackend,
+};
 use std::path::{Path, PathBuf};
 
 /// Opens [`LocalBackend`] sessions for `file://` endpoints.
@@ -84,6 +86,7 @@ impl BackendDriver for LocalDriver {
         &self,
         endpoint: &Endpoint,
         _credentials: &Credentials,
+        _options: &ConnectionOptions,
     ) -> Result<Box<dyn StorageBackend>> {
         let requested = parse_root(endpoint.authority_and_path())?;
 
@@ -178,7 +181,7 @@ mod tests {
 
         let driver = LocalDriver::new();
         let backend = driver
-            .connect(&endpoint, &Credentials::anonymous())
+            .connect(&endpoint, &Credentials::anonymous(), &ConnectionOptions::new())
             .await
             .unwrap();
 
@@ -193,7 +196,7 @@ mod tests {
         let driver = LocalDriver::new();
         let endpoint = Endpoint::parse("file:///definitely/not/here/at/all").unwrap();
         let err = driver
-            .connect(&endpoint, &Credentials::anonymous())
+            .connect(&endpoint, &Credentials::anonymous(), &ConnectionOptions::new())
             .await
             .err()
             .expect("connecting to a non-existent directory must fail");
@@ -209,7 +212,7 @@ mod tests {
         let uri = uri_for(&std::fs::canonicalize(&file).unwrap());
         let endpoint = Endpoint::parse(&uri).unwrap();
         let err = LocalDriver::new()
-            .connect(&endpoint, &Credentials::anonymous())
+            .connect(&endpoint, &Credentials::anonymous(), &ConnectionOptions::new())
             .await
             .err()
             .expect("a file is not a valid root");
@@ -225,7 +228,11 @@ mod tests {
         // A local filesystem has no notion of a login, so credentials must be
         // accepted and ignored rather than causing a confusing failure.
         let backend = LocalDriver::new()
-            .connect(&endpoint, &Credentials::user_password("someone", "secret"))
+            .connect(
+                &endpoint,
+                &Credentials::user_password("someone", "secret"),
+                &ConnectionOptions::new(),
+            )
             .await
             .unwrap();
         backend.shutdown().await.unwrap();

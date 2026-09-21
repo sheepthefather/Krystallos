@@ -11,7 +11,7 @@
 //! identical output for the same file.
 
 use clap::{Parser, Subcommand};
-use krystallos_core::{BackendRegistry, Credentials};
+use krystallos_core::{BackendRegistry, ConnectionOptions, Credentials};
 use krystallos_local::LocalDriver;
 use krystallos_smb::SmbDriver;
 use std::path::PathBuf;
@@ -41,6 +41,16 @@ struct Cli {
 
     #[arg(long, global = true, env = "KRYSTALLOS_DOMAIN", value_name = "DOMAIN")]
     domain: Option<String>,
+
+    /// Request SMB3 transport encryption.
+    ///
+    /// Off by default. libsmb2 uses its own portable reference AES everywhere
+    /// except Apple, including Android, and enabling encryption was measured
+    /// dropping reads from hundreds of megabytes per second to under four. Turn
+    /// it on when the network is not trusted and the slower transfer is the
+    /// right trade.
+    #[arg(long, global = true, env = "KRYSTALLOS_SMB_SEAL")]
+    smb_seal: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -111,6 +121,11 @@ fn main() -> ExitCode {
         domain: cli.domain.clone(),
     };
 
+    let mut options = ConnectionOptions::new();
+    if cli.smb_seal {
+        options.set(krystallos_smb::OPT_SEAL, "true");
+    }
+
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
@@ -119,7 +134,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let result = runtime.block_on(run(cli, credentials));
+    let result = runtime.block_on(run(cli, credentials, options));
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -137,7 +152,11 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli, credentials: Credentials) -> krystallos_core::Result<()> {
+async fn run(
+    cli: Cli,
+    credentials: Credentials,
+    options: ConnectionOptions,
+) -> krystallos_core::Result<()> {
     let reg = registry();
 
     match cli.command {
@@ -151,18 +170,18 @@ async fn run(cli: Cli, credentials: Credentials) -> krystallos_core::Result<()> 
             }
             Ok(())
         }
-        Command::Ls { uri, path } => commands::ls(&reg, &credentials, &uri, &path).await,
-        Command::Stat { uri, path } => commands::stat(&reg, &credentials, &uri, &path).await,
-        Command::Cat { uri, path } => commands::cat(&reg, &credentials, &uri, &path).await,
+        Command::Ls { uri, path } => commands::ls(&reg, &credentials, &options, &uri, &path).await,
+        Command::Stat { uri, path } => commands::stat(&reg, &credentials, &options, &uri, &path).await,
+        Command::Cat { uri, path } => commands::cat(&reg, &credentials, &options, &uri, &path).await,
         Command::Get { uri, path, dest } => {
-            commands::get(&reg, &credentials, &uri, &path, &dest).await
+            commands::get(&reg, &credentials, &options, &uri, &path, &dest).await
         }
         Command::Put { uri, path, src } => {
-            commands::put(&reg, &credentials, &uri, &path, &src).await
+            commands::put(&reg, &credentials, &options, &uri, &path, &src).await
         }
-        Command::Mkdir { uri, path } => commands::mkdir(&reg, &credentials, &uri, &path).await,
-        Command::Rm { uri, path } => commands::rm(&reg, &credentials, &uri, &path).await,
-        Command::Rmdir { uri, path } => commands::rmdir(&reg, &credentials, &uri, &path).await,
-        Command::Mv { uri, from, to } => commands::mv(&reg, &credentials, &uri, &from, &to).await,
+        Command::Mkdir { uri, path } => commands::mkdir(&reg, &credentials, &options, &uri, &path).await,
+        Command::Rm { uri, path } => commands::rm(&reg, &credentials, &options, &uri, &path).await,
+        Command::Rmdir { uri, path } => commands::rmdir(&reg, &credentials, &options, &uri, &path).await,
+        Command::Mv { uri, from, to } => commands::mv(&reg, &credentials, &options, &uri, &from, &to).await,
     }
 }
