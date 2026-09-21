@@ -346,7 +346,7 @@ impl ByteRange {
 /// will work.
 pub(crate) fn already_closed(what: &str) -> KernelError {
     KernelError::ConnectionLost {
-        message: format!("this {what} has already been closed"),
+        detail: format!("this {what} has already been closed"),
     }
 }
 

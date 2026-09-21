@@ -32,6 +32,23 @@
 //! was in flight. That is tolerable here because every operation is bounded by
 //! libsmb2's timeout (see `DEFAULT_TIMEOUT_SECS`), but it means "cancel" in the
 //! UI is really "stop waiting", not "stop working".
+//!
+//! # Naming: two words UniFFI has already taken
+//!
+//! Both are enforced by the generated Kotlin failing to compile, so they are
+//! worth knowing before adding a method rather than after:
+//!
+//! - **`close`.** UniFFI gives every exported object a synchronous
+//!   `AutoCloseable.close()` that releases the Kotlin-side handle. An async
+//!   method of the same name collides with it (`CONFLICTING_OVERLOADS`), so
+//!   releasing a session is [`Session::disconnect`] and releasing a file is
+//!   [`RemoteFile::release`]. The two are genuinely different operations, so
+//!   the distinct names are an improvement rather than a workaround.
+//! - **A field named `message` on an error variant.** UniFFI generates
+//!   `override val message` for each one, so a field of that name collides
+//!   (`REDECLARATION`). [`KernelError`] uses `detail` instead.
+
+#![allow(linker_messages)]
 
 mod error;
 mod types;
@@ -235,11 +252,20 @@ impl Session {
         }))
     }
 
-    /// Close the session.
+    /// Disconnect from the endpoint.
     ///
     /// Idempotent. After this every other call fails with `ConnectionLost`, and
     /// any file handles opened from it are dead.
-    pub async fn close(&self) -> Result<()> {
+    ///
+    /// # Why this is not called `close`
+    ///
+    /// UniFFI generates an `AutoCloseable.close()` on every exported object —
+    /// that one releases the Kotlin-side handle to the Rust object, and it is
+    /// synchronous. A method named `close` here would be `suspend`, and the two
+    /// cannot coexist: the generated Kotlin fails to compile with
+    /// `CONFLICTING_OVERLOADS`. They are also genuinely different operations,
+    /// so sharing a name would be misleading even if it compiled.
+    pub async fn disconnect(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -357,7 +383,12 @@ impl RemoteFile {
     }
 
     /// Release the handle. Idempotent.
-    pub async fn close(&self) -> Result<()> {
+    ///
+    /// Named `release` rather than `close` for the reason given on
+    /// [`Session::disconnect`]: UniFFI already generates a synchronous
+    /// `AutoCloseable.close()`, and an async method of the same name does not
+    /// compile alongside it.
+    pub async fn release(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -425,7 +456,7 @@ mod tests {
         assert_eq!(entries[0].name, "a.txt");
         assert_eq!(entries[0].metadata.len, 5);
 
-        session.close().await.expect("close");
+        session.disconnect().await.expect("close");
         assert!(session.is_closed());
     }
 
@@ -438,9 +469,9 @@ mod tests {
             .await
             .expect("connect");
 
-        session.close().await.expect("close");
+        session.disconnect().await.expect("close");
         // Closing twice must be harmless.
-        session.close().await.expect("close again");
+        session.disconnect().await.expect("close again");
 
         match session.list("/".to_string()).await {
             Err(KernelError::ConnectionLost { .. }) => {}
@@ -475,7 +506,7 @@ mod tests {
             written += n as usize;
         }
         file.flush().await.expect("flush");
-        file.close().await.expect("close");
+        file.release().await.expect("close");
 
         let meta = session.stat("/media/x.bin".to_string()).await.expect("stat");
         assert_eq!(meta.len, payload.len() as u64);
@@ -489,7 +520,7 @@ mod tests {
             .await
             .expect("read back");
         assert_eq!(read.data, payload, "round-tripped bytes must match exactly");
-        file.close().await.expect("close");
+        file.release().await.expect("close");
 
         session
             .rename("/media/x.bin".to_string(), "/media/y.bin".to_string())
@@ -560,8 +591,8 @@ mod tests {
             .open("/f".to_string(), OpenFlags::read_only())
             .await
             .expect("open");
-        file.close().await.expect("close");
-        file.close().await.expect("close again");
+        file.release().await.expect("close");
+        file.release().await.expect("close again");
 
         match file.read_at(0, 3).await {
             Err(KernelError::ConnectionLost { .. }) => {}

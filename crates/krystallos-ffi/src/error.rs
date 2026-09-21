@@ -53,19 +53,24 @@ pub enum KernelError {
 
     /// The session is gone; every later call on it will fail too. **Reconnect
     /// rather than retry.**
-    #[error("connection lost: {message}")]
-    ConnectionLost { message: String },
+    ///
+    /// The field is `detail`, not `message`, on purpose: UniFFI generates an
+    /// `override val message` for every error variant, so a field named
+    /// `message` collides with it and the generated Kotlin fails to compile
+    /// with `REDECLARATION`.
+    #[error("connection lost: {detail}")]
+    ConnectionLost { detail: String },
 
     /// Credentials were rejected. Distinct from `PermissionDenied`: this one
     /// means "fix your settings", that one means "this account cannot read that
     /// file".
-    #[error("authentication failed: {message}")]
-    Auth { message: String },
+    #[error("authentication failed: {detail}")]
+    Auth { detail: String },
 
     /// Anything else, with the backend's own description preserved. Losing that
     /// text would make server-specific quirks undiagnosable.
-    #[error("backend error: {message}")]
-    Backend { message: String },
+    #[error("backend error: {detail}")]
+    Backend { detail: String },
 }
 
 impl From<CoreError> for KernelError {
@@ -81,15 +86,15 @@ impl From<CoreError> for KernelError {
             CoreError::Unsupported { operation } => KernelError::Unsupported {
                 operation: operation.to_string(),
             },
-            CoreError::ConnectionLost { message } => KernelError::ConnectionLost { message },
-            CoreError::Auth { message } => KernelError::Auth { message },
-            CoreError::Backend { message } => KernelError::Backend { message },
+            CoreError::ConnectionLost { message } => KernelError::ConnectionLost { detail: message },
+            CoreError::Auth { message } => KernelError::Auth { detail: message },
+            CoreError::Backend { message } => KernelError::Backend { detail: message },
             // `std::io::Error` has no portable equivalent on the Kotlin side,
             // and its `Display` is the only part a caller could use. Reporting
             // it as a backend error keeps the message without inventing a
             // category Android cannot act on differently anyway.
             CoreError::Io(e) => KernelError::Backend {
-                message: e.to_string(),
+                detail: e.to_string(),
             },
         }
     }
@@ -188,7 +193,7 @@ mod tests {
         ))
         .into();
         match e {
-            KernelError::Backend { message } => {
+            KernelError::Backend { detail: message } => {
                 assert!(message.contains("the socket gave up"), "got: {message}");
             }
             other => panic!("expected Backend, got {other:?}"),
