@@ -1,4 +1,4 @@
-﻿use crate::format::{entry_line, human_bytes, metadata_block};
+use crate::format::{entry_line, human_bytes, metadata_block};
 use krystallos_core::{
     BackendRegistry, ConnectionOptions, Credentials, Error, FileHandle, OpenMode, Result,
     StorageBackend, VfsPath,

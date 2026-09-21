@@ -1,4 +1,4 @@
-﻿//! Debug CLI for the Krystallos kernel.
+//! Debug CLI for the Krystallos kernel.
 //!
 //! This exists so that backend work can be driven and inspected on the host,
 //! without an emulator, an APK build, or a device. Everything a backend can do

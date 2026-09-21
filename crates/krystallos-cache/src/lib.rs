@@ -1,4 +1,4 @@
-﻿//! Read-ahead buffering.
+//! Read-ahead buffering.
 //!
 //! # What this is for, and what it is not
 //!
