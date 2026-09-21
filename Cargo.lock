@@ -262,6 +262,7 @@ version = "0.1.0"
 dependencies = [
  "cmake",
  "dunce",
+ "libc",
  "windows-sys",
 ]
 

@@ -162,6 +162,35 @@ pub const SMB2_FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
 pub const SMB2_FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
 pub const SMB2_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
+/// Open flags for [`smb2_open`], taken from the target platform's `fcntl.h`.
+///
+/// libsmb2 does not define these itself — it includes the platform header, or
+/// has `lib/compat.h` fill them in — and it interprets whatever number it
+/// receives using the values it was compiled against. So they have to be the
+/// *target's* values, not a fixed set: `O_CREAT` is `0x100` on MSVC and `0o100`
+/// on Linux, and passing one platform's number to the other silently asks for
+/// something else. On Unix these come from `libc` for exactly that reason.
+pub mod open_flags {
+    #[cfg(unix)]
+    pub use libc::{O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+
+    #[cfg(windows)]
+    mod msvc {
+        use std::os::raw::c_int;
+
+        // Values from the MSVC `<fcntl.h>`.
+        pub const O_RDONLY: c_int = 0x0000;
+        pub const O_WRONLY: c_int = 0x0001;
+        pub const O_RDWR: c_int = 0x0002;
+        pub const O_CREAT: c_int = 0x0100;
+        pub const O_TRUNC: c_int = 0x0200;
+        pub const O_EXCL: c_int = 0x0400;
+    }
+
+    #[cfg(windows)]
+    pub use msvc::{O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+}
+
 // Edition 2024 requires the `unsafe` keyword on `extern` blocks: declaring a
 // foreign function is itself an unchecked assertion that the signature matches
 // what the library actually exports.
@@ -229,6 +258,17 @@ unsafe extern "C" {
     pub fn smb2_stat(
         smb2: *mut smb2_context,
         path: *const c_char,
+        st: *mut smb2_stat_64,
+    ) -> c_int;
+
+    /// Metadata for an already-open file, keyed by handle rather than path.
+    ///
+    /// This is how the size is obtained after opening: the create response
+    /// carries it, but the synchronous API does not surface it, so the size has
+    /// to be queried separately.
+    pub fn smb2_fstat(
+        smb2: *mut smb2_context,
+        fh: *mut smb2fh,
         st: *mut smb2_stat_64,
     ) -> c_int;
 

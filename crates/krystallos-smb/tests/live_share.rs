@@ -304,24 +304,124 @@ fn compare(a: &[Entry], b: &[Entry]) {
 }
 
 #[tokio::test]
-async fn opening_a_file_is_reported_as_unimplemented_rather_than_faked() {
+async fn a_written_file_reads_back_byte_for_byte() {
     let _guard = fixture_lock().lock().await;
-    // Until the file-handle lifetime design lands, `open` must say so. A stub
-    // that returned a handle would fail later and less clearly.
     let live = require_share!();
     let backend = registry()
         .connect(&live.uri, &live.credentials)
         .await
         .expect("connect");
 
-    let err = match backend.open(&p("/readme.txt"), OpenMode::read()).await {
-        Ok(_) => panic!("open is not implemented yet, but it returned a handle"),
-        Err(e) => e,
-    };
-    assert!(
-        matches!(err, krystallos_core::Error::Unsupported { .. }),
-        "expected Unsupported for now, got {err:?}"
+    let name = format!("/krystallos-io-{}.bin", std::process::id());
+    let path = p(&name);
+    let _ = backend.remove_file(&path).await;
+
+    // Deliberately not a round number of chunks, and not a repeating pattern:
+    // a short final chunk and non-repeating bytes are what catch an off-by-one
+    // in the transfer loop.
+    let payload: Vec<u8> = (0..3 * 1024 * 1024 + 12345)
+        .map(|i| ((i * 31 + (i >> 7)) % 251) as u8)
+        .collect();
+
+    let handle = backend
+        .open(&path, OpenMode::write().with_truncate())
+        .await
+        .expect("open for write");
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let n = handle
+            .write_at(offset as u64, &payload[offset..])
+            .await
+            .expect("write");
+        assert!(n > 0, "a write that makes no progress would loop forever");
+        offset += n;
+    }
+    handle.flush().await.expect("flush");
+    handle.close().await.expect("close");
+
+    let meta = backend.stat(&path).await.expect("stat after write");
+    assert_eq!(
+        meta.len,
+        payload.len() as u64,
+        "the file on the server should be exactly as long as what was written"
     );
 
+    let handle = backend
+        .open(&path, OpenMode::read())
+        .await
+        .expect("open for read");
+    let mut readback = vec![0u8; payload.len()];
+    handle
+        .read_exact_at(0, &mut readback)
+        .await
+        .expect("read back");
+    handle.close().await.expect("close");
+
+    assert_eq!(readback, payload, "round-tripped bytes must match exactly");
+
+    backend.remove_file(&path).await.expect("cleanup");
     backend.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn reading_the_same_file_through_both_backends_gives_the_same_bytes() {
+    let _guard = fixture_lock().lock().await;
+    let live = require_share!();
+    let Some(local_uri) = std::env::var("KRYSTALLOS_TEST_LOCAL_URI").ok() else {
+        eprintln!("skipped: KRYSTALLOS_TEST_LOCAL_URI is not set");
+        return;
+    };
+
+    let reg = registry();
+    let smb = reg.connect(&live.uri, &live.credentials).await.expect("connect smb");
+    let local = reg
+        .connect(&local_uri, &Credentials::anonymous())
+        .await
+        .expect("connect local");
+
+    // A few mebibytes: enough to span several transfer chunks, so a bug in
+    // chunk-boundary handling shows up. More would only make the test slower.
+    let path = p("/big.bin");
+    const WINDOW: u64 = 3 * 1024 * 1024;
+
+    let smb_handle = smb.open(&path, OpenMode::read()).await.expect("open via smb");
+    let local_handle = local
+        .open(&path, OpenMode::read())
+        .await
+        .expect("open via local");
+
+    let mut from_smb = vec![0u8; WINDOW as usize];
+    let mut from_local = vec![0u8; WINDOW as usize];
+    smb_handle
+        .read_exact_at(0, &mut from_smb)
+        .await
+        .expect("read via smb");
+    local_handle
+        .read_exact_at(0, &mut from_local)
+        .await
+        .expect("read via local");
+
+    assert_eq!(
+        from_smb, from_local,
+        "the same file read through two backends produced different bytes"
+    );
+
+    // And the same must hold from an offset that is not a chunk boundary.
+    let offset = 1_000_000u64;
+    let mut smb_tail = vec![0u8; 4096];
+    let mut local_tail = vec![0u8; 4096];
+    smb_handle.read_exact_at(offset, &mut smb_tail).await.expect("smb tail");
+    local_handle
+        .read_exact_at(offset, &mut local_tail)
+        .await
+        .expect("local tail");
+    assert_eq!(
+        smb_tail, local_tail,
+        "reads from a non-aligned offset disagree between backends"
+    );
+
+    smb_handle.close().await.expect("close smb");
+    local_handle.close().await.expect("close local");
+    smb.shutdown().await.expect("shutdown smb");
+    local.shutdown().await.expect("shutdown local");
 }

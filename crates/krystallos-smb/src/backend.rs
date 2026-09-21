@@ -80,13 +80,6 @@ impl ParsedEndpoint {
 }
 
 /// A connected SMB share.
-///
-/// # Scope
-///
-/// Path-based operations only. `open` and the file handle it would return are
-/// not implemented yet — a handle has to outlive a single command, which needs
-/// its own lifetime design on the session thread. Until that lands, `open`
-/// reports [`Error::Unsupported`] rather than pretending.
 pub struct SmbBackend {
     session: Session,
     endpoint: String,
@@ -99,9 +92,9 @@ impl StorageBackend for SmbBackend {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // What SMB itself supports. Note that `random_read` and `random_write`
-        // describe the protocol: SMB2 has positioned reads and writes, and
-        // libsmb2 exposes them as `smb2_pread`/`smb2_pwrite`.
+        // What SMB itself supports. `random_read` and `random_write` are real
+        // here: SMB2 has positioned reads and writes, and libsmb2 exposes them
+        // as `smb2_pread`/`smb2_pwrite`.
         Capabilities::FULL
     }
 
@@ -113,10 +106,8 @@ impl StorageBackend for SmbBackend {
         self.session.stat(path).await
     }
 
-    async fn open(&self, _path: &VfsPath, _mode: OpenMode) -> Result<Box<dyn FileHandle>> {
-        Err(Error::Unsupported {
-            operation: "open — SMB file I/O is not implemented yet",
-        })
+    async fn open(&self, path: &VfsPath, mode: OpenMode) -> Result<Box<dyn FileHandle>> {
+        Ok(Box::new(self.session.open(path, mode).await?))
     }
 
     async fn remove_file(&self, path: &VfsPath) -> Result<()> {
@@ -188,6 +179,19 @@ impl BackendDriver for SmbDriver {
         };
 
         let session = Session::connect(config).await?;
+
+        // The negotiated transfer sizes decide how many round-trips a large
+        // file costs, which is the difference between a fast transfer and a
+        // slow one. Worth being able to see without a packet capture.
+        if std::env::var_os("KRYSTALLOS_DEBUG").is_some() {
+            eprintln!(
+                "krystallos: {} negotiated max_read={} KiB max_write={} KiB",
+                parsed.label(),
+                session.max_read_size() / 1024,
+                session.max_write_size() / 1024,
+            );
+        }
+
         Ok(Box::new(SmbBackend {
             session,
             endpoint: parsed.label(),

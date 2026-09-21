@@ -1,4 +1,4 @@
-use crate::format::{entry_line, human_bytes, metadata_block};
+﻿use crate::format::{entry_line, human_bytes, metadata_block};
 use krystallos_core::{
     BackendRegistry, Credentials, Error, OpenMode, Result, StorageBackend, VfsPath,
 };
@@ -111,24 +111,52 @@ pub async fn get(
     let outcome = async {
         let path = parse(path)?;
         let handle = open_for_read(backend.as_ref(), &path).await?;
-        let total = handle.len();
+        // Only for the progress line; the loop below does not depend on it.
+        let expected = handle.len();
 
         let mut file = std::fs::File::create(dest)?;
         let mut buf = vec![0u8; CHUNK];
         let mut offset = 0u64;
-        while offset < total {
+        // Transfer statistics, reported under KRYSTALLOS_DEBUG. The number of
+        // read calls and their sizes say immediately whether a slow transfer is
+        // about round-trip count or about per-call latency, which are fixed in
+        // completely different ways.
+        let debug = std::env::var_os("KRYSTALLOS_DEBUG").is_some();
+        let started = std::time::Instant::now();
+        let mut reads = 0u64;
+        let mut smallest = usize::MAX;
+        let mut largest = 0usize;
+        // Run until the backend says end-of-file rather than until a byte count
+        // is reached. Trusting a length here would mean a backend that reports
+        // zero — or reports a stale size — silently produces an empty file,
+        // which is the worst possible failure for a download.
+        loop {
             let n = handle.read_at(offset, &mut buf).await?;
             if n == 0 {
-                // A backend reporting a length larger than the data it will
-                // serve: stop rather than spin forever on a short read.
                 break;
+            }
+            if debug {
+                reads += 1;
+                smallest = smallest.min(n);
+                largest = largest.max(n);
             }
             file.write_all(&buf[..n])?;
             offset += n as u64;
-            progress(offset, total);
+            progress(offset, expected);
+        }
+        if debug {
+            let secs = started.elapsed().as_secs_f64();
+            eprintln!(
+                "krystallos: {reads} reads, {smallest}..{largest} bytes each, \
+                 {:.1} MiB total in {secs:.2}s = {:.2} MiB/s \
+                 ({:.2} ms per read)",
+                offset as f64 / (1024.0 * 1024.0),
+                (offset as f64 / (1024.0 * 1024.0)) / secs,
+                secs * 1000.0 / reads.max(1) as f64,
+            );
         }
         file.flush()?;
-        progress_done(offset, total);
+        progress_done(offset, expected);
         handle.close().await?;
         Ok(())
     }

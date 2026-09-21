@@ -12,6 +12,11 @@ build = "build.rs"
 
 [dependencies]
 
+# `O_*` open flags, which libsmb2 reads back with the values it was compiled
+# against — so they have to be the target platform's.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # For `WSAStartup` and the real `WSADATA` layout. Declaring that struct by hand
 # would be guessing at a hundred version-dependent fields we never read.
