@@ -1,0 +1,26 @@
+[package]
+name = "krystallos-smb"
+description = "SMB2/3 backend for the Krystallos kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+krystallos-core.workspace = true
+krystallos-sys-smb2 = { path = "../krystallos-sys-smb2" }
+async-trait.workspace = true
+tokio.workspace = true
+
+# `errno` constants for classifying libsmb2's `-errno` return values. The values
+# that matter here are not the same on every platform — `ENOTEMPTY` is 39 on
+# Linux and 41 on MSVC — so they are taken from the platform rather than
+# hardcoded.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+krystallos-local.workspace = true

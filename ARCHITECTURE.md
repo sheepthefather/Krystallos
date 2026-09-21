@@ -146,12 +146,50 @@ submodule 锁定在 `557e837d3e00636b543f17ba1b9bdf872fa1644d`（2026-09-19）�
 
 ### 并发模型
 
-libsmb2 **不是线程安全的**——全仓库 `lib/*.c` grep `pthread` 零命中，无任何内部锁；同步 API 内部是 `poll(&pfd, 1, 1000)` 阻塞循环。因此：
+libsmb2 **不是线程安全的**——全仓库 `lib/*.c` grep `pthread` 零命中，无任何内部锁。因此一个 `smb2_context` **必须**固定在一个线程上，actor 模型是必需的，不是可选优化。每个会话一个专用 OS 线程，调用方通过 channel 发命令、等回复，context 指针永不离开该线程。
 
-- 一个 `smb2_context` **必须**固定在一个线程上。actor 模型是必需的，不是可选优化。
-- actor 线程用 `smb2_get_fd()` / `smb2_which_events()` / `smb2_service(revents)` 驱动事件循环。
-- **fd 会变**（重连、多地址 Happy Eyeballs），必须挂 `smb2_fd_event_callbacks`，否则重连后 poll 的是失效 fd。
-- 异步命令配 `smb2_command_cb` 回调，回调在 `smb2_service` 调用线程内**同步执行**，因此**回调里绝对不能调用 libsmb2 API**（会死锁）。结果用 oneshot 送回 async 侧。
+#### 为什么用阻塞调用而不是手工驱动事件循环
+
+libsmb2 也提供异步 API 加 `smb2_get_fd` / `smb2_which_events` / `smb2_service`，可以让一个会话同时有多个操作在途——这是最初的计划。放弃它是因为一个实现时才暴露的工程问题：
+
+**事件循环阻塞在 `poll` 时无法感知新命令。** 要么往 poll 集合里塞一个唤醒通道（Unix 用 pipe、Windows 用 loopback socket，多两套平台相关代码），要么用短 poll 超时。后者会给每个操作加一个延迟下限，并且让 CPU **永久性地每秒醒来多次**——在手机上这是为偶尔省几毫秒而持续付出的电量代价。
+
+阻塞调用两个问题都没有：空闲时线程零成本停在 `recv`，命令到达即刻唤醒。代价是单个会话串行执行操作，而对播放单个媒体流的播放器来说本来就是这样。
+
+对外 API 完全相同。若 `krystallos-cache` 的基准显示需要在一个会话内并发多个读，改动只限于 `krystallos-smb/src/actor.rs`。
+
+#### 在回调里绝不能调用 libsmb2 API
+
+这条对当前设计不再适用（我们不走回调），但若将来切换到异步 API，必须记住：回调在 `smb2_service` 的调用线程内**同步执行**，从回调里调用同一 context 的任何 libsmb2 函数会死锁。
+
+### 文件路径约定
+
+两条来自源码、不能靠猜的事实：
+
+- **路径相对于共享根，且不带前导分隔符**。`lib/init.c:276-287` 把 `smb2://server/share/dir/file` 解析成 share `share` 与 path `dir/file`。
+- **共享根是空字符串**。`lib/smb2-cmd-create.c:86` 把 null 或空名视为「无名」，这正是 SMB 寻址树根的方式。
+
+### Windows 上必须先初始化 Winsock
+
+libsmb2 **不调用 `WSAStartup`**——`lib/socket.c:1464` 只是报错说没初始化。这是库的正确行为：进程级 socket 初始化属于应用而非库。`krystallos-sys-smb2` 通过 `OnceLock` 做一次惰性初始化，其他平台是空操作。
+
+### 错误分类：三个通道，缺一不可
+
+这是实现中最费周折的部分。**libsmb2 不通过单一通道报告失败**，哪个通道有值取决于哪条代码路径失败了。三者都是对着真实服务器观察到的，不是推测：
+
+| 通道 | 覆盖范围 | 出处 |
+|---|---|---|
+| `smb2_get_nterror()` | 大多数路径 | `smb2_set_nterror`，见 `libsmb2.c:3012`、`:3354`、`:3452`、`:3785` |
+| **消息里的 `STATUS_*` 标识** | Create 路径等 | `libsmb2.c:2092` 用的是 `smb2_set_error`，**从不设置 nterror** |
+| **返回值 `-errno`** | 消息为空的路径 | `stat` 一个不存在的文件时消息为空、nterror 为 0，只剩返回值 |
+
+因此 `error::from_parts` 依次尝试三者。三个具体的坑：
+
+1. **`nterror` 不会被每次调用重置。** `smb2_set_error` 只在消息**为空**时才清零它（`lib/init.c:600-601`），所以它可能残留上一次操作的值。分类失败时必须继续往下走，不能直接采信。
+2. **裸 `-1` 不是 `-errno`。** `lib/sync.c:76-95` 的 `wait_for_reply` 在 poll 失败、超时无连接、或 `smb2_service` 报不可恢复时返回裸 `-1`——这三种都意味着连接已断。**绝不能把它喂给 errno 表**，那里 `-1` 与 `-EPERM` 无法区分。这正是曾经把一个不可达的服务器报成 `permission denied` 的原因，而这是所有可能答案里最误导的一个：它把排查方向指向了完全错误的层。
+3. **`EPERM` 也不能当作权限错误。** libsmb2 把若干互不相关的状态映到它上面（`STATUS_FILE_IS_A_DIRECTORY`、`STATUS_CANNOT_DELETE`，见 `lib/errors.c:1123-1128`）。`EACCES` 才是无歧义的权限信号。
+
+另外 `Auth` 的消息不直接用 libsmb2 的文本：凭证被拒后它的描述往往是**次生症状**（socket 被拆掉），裸着显示会让人去排查网络而不是密码。原始文本保留，但明确标为次要。
 
 ### 加密能力上限
 
@@ -278,5 +316,19 @@ llvm-nm <out>/arm64-v8a/libkrystallos_ffi.so | grep smb2_init_context
 | 集成测试 | 对着真实 SMB2/3 共享：列举、stat、**>1 GB** 文件分块读取校验、建目录→上传→重命名→读回→删除全链路 |
 | 交叉编译 | 三个 ABI 产出 `.so`，64 位目标满足 16 KB 对齐 |
 | 手工验证 | `krystallos-cli` 对真实共享操作，与 Windows 资源管理器所见交叉比对 |
+
+### 集成测试
+
+`crates/krystallos-smb/tests/live_share.rs` 里是对着真实服务器跑的测试。未设置环境变量时**跳过而非失败**，所以在没有共享的机器上 `cargo test` 依然是绿的：
+
+```bash
+KRYSTALLOS_TEST_SMB_URI=smb://127.0.0.1/krystallos-test \
+KRYSTALLOS_TEST_SMB_USER=b \
+KRYSTALLOS_TEST_SMB_PASSWORD=b \
+KRYSTALLOS_TEST_LOCAL_URI=file:///D:/krystallos-test-data \
+cargo test -p krystallos-smb --test live_share -- --nocapture
+```
+
+`KRYSTALLOS_TEST_LOCAL_URI` 指向**同一个目录**时，差分测试会启用——这是本地后端存在的意义所在。
 
 **端到端判据**：`krystallos-cli` 能对 `file://` 与 `smb://` 两种 scheme 执行同一套操作——列举目录、读取 **>1 GB** 文件并通过 SHA-256 差分比对一致、完成上传→重命名→删除的完整往返。

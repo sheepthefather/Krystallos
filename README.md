@@ -8,15 +8,15 @@ Krystallos 把远程存储呈现为一套类似本地文件系统的接口：连
 
 ## 当前状态
 
-**内核骨架已可用**：抽象层、本地文件系统后端、调试 CLI 均已实现并通过测试；libsmb2 已完成交叉编译验证，SMB 后端本体尚未实现。
+**SMB2/3 后端已可用**：抽象层、本地后端、SMB 后端、调试 CLI 均已实现并通过测试（含对真实共享的集成测试与后端间差分测试）。文件读写（`open`/`read`/`write`）尚未实现。
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M1 | 工作区 + libsmb2 构建 + 三 ABI 交叉编译 | ✅ |
 | M2 | `krystallos-core` 抽象层 | ✅ |
 | M3 | `krystallos-local` + `krystallos-cli` | ✅ |
-| M4 | SMB 连接、列举、stat | ⬜ |
-| M5 | SMB 读写路径 + 差分测试 | ⬜ |
+| M4 | SMB 连接、列举、stat、目录操作 | ✅ |
+| M5 | SMB 文件读写 + 大文件差分测试 | ⬜ |
 | M6 | 预读缓存 | ⬜ |
 | M7 | UniFFI 门面 | ⬜ |
 
@@ -49,8 +49,18 @@ cargo run -p krystallos-cli -- rm  file:///D:/media /movies/b.mkv
 密码走环境变量，避免留在 shell 历史里：
 
 ```bash
-export KRYSTALLOS_PASSWORD=...
-cargo run -p krystallos-cli -- --user alice ls smb://nas.local/media
+export KRYSTALLOS_USER=b KRYSTALLOS_PASSWORD=...
+cargo run -p krystallos-cli -- ls smb://nas.local/media
+```
+
+同一个 CLI 对两种 scheme 完全等价，这是它存在的意义——后端行为不必经过模拟器或真机即可验证：
+
+```bash
+cargo run -p krystallos-cli -- ls  file:///D:/media
+cargo run -p krystallos-cli -- ls  smb://nas.local/media
+cargo run -p krystallos-cli -- stat smb://nas.local/media /movies/a.mkv
+cargo run -p krystallos-cli -- mkdir smb://nas.local/media /new-folder
+cargo run -p krystallos-cli -- mv   smb://nas.local/media /a.mkv /b.mkv
 ```
 
 ## 构建到 Android

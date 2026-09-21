@@ -13,6 +13,7 @@
 use clap::{Parser, Subcommand};
 use krystallos_core::{BackendRegistry, Credentials};
 use krystallos_local::LocalDriver;
+use krystallos_smb::SmbDriver;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -97,6 +98,7 @@ enum Command {
 fn registry() -> BackendRegistry {
     let mut reg = BackendRegistry::new();
     reg.register(Box::new(LocalDriver::new()));
+    reg.register(Box::new(SmbDriver::new()));
     reg
 }
 

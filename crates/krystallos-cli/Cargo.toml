@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 krystallos-core.workspace = true
 krystallos-local.workspace = true
+krystallos-smb = { path = "../krystallos-smb" }
 tokio.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 humantime = "2"

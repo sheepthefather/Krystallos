@@ -211,6 +211,7 @@ dependencies = [
  "humantime",
  "krystallos-core",
  "krystallos-local",
+ "krystallos-smb",
  "tokio",
 ]
 
@@ -243,11 +244,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "krystallos-smb"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "krystallos-core",
+ "krystallos-local",
+ "krystallos-sys-smb2",
+ "libc",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "krystallos-sys-smb2"
 version = "0.1.0"
 dependencies = [
  "cmake",
  "dunce",
+ "windows-sys",
 ]
 
 [[package]]

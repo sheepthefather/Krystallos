@@ -157,6 +157,14 @@ impl fmt::Display for VfsPath {
     }
 }
 
+/// Lets a path be used anywhere a `&str` is wanted, which is most places —
+/// every backend needs a string form to hand to its protocol library.
+impl AsRef<str> for VfsPath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 impl fmt::Debug for VfsPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "VfsPath({:?})", self.0)

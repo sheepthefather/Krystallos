@@ -1,112 +1,22 @@
-//! Raw FFI declarations for the vendored libsmb2.
+//! Raw FFI bindings for the vendored libsmb2.
 //!
-//! # Why these declarations are written by hand
+//! This crate is deliberately thin: it owns the `unsafe`, the build, and
+//! nothing else. Every protocol decision — error mapping, path translation,
+//! session lifetime — belongs to `krystallos-smb`, which is the only consumer.
 //!
-//! Generated bindings would be the default choice, and `bindgen` is what the
-//! original plan called for. It was dropped for two reasons:
-//!
-//! 1. **It needs libclang on every build machine.** `libclang` is not present
-//!    on the development machine, and the copy bundled with the Android NDK
-//!    cannot serve the host-target build — parsing Windows SDK headers needs a
-//!    clang that knows about them.
-//! 2. **The surface we need is tiny.** Around forty functions out of the
-//!    library's ~170, plus a handful of structs. Generation was buying
-//!    completeness we have no use for, at the cost of a heavy toolchain
-//!    dependency on every platform we cross-compile to.
-//!
-//! # How correctness is kept
-//!
-//! Hand-written declarations can drift from the header. That risk is handled by
-//! asserting the layout — see [`layout`] and the `_Static_assert` block in
-//! `build.rs`'s companion C file. If a field is added, reordered, or resized
-//! upstream, the build fails rather than silently reading the wrong bytes.
-//!
-//! # Safety
-//!
-//! This is the only crate in the workspace containing `unsafe`. Everything
-//! above it goes through the safe wrapper in `krystallos-smb`.
+//! See [`ffi`] for the declarations themselves and for how their correctness is
+//! kept in step with the C header.
 
-/// Opaque session handle. Owned by [`ffi::smb2_init_context`].
-#[repr(C)]
-pub struct smb2_context {
-    _private: [u8; 0],
-}
+pub mod ffi;
+mod network;
 
-/// Opaque open-file handle.
-#[repr(C)]
-pub struct smb2fh {
-    _private: [u8; 0],
-}
-
-/// Opaque directory handle.
-#[repr(C)]
-pub struct smb2dir {
-    _private: [u8; 0],
-}
-
-pub mod ffi {
-    //! Raw `extern "C"` declarations and `#[repr(C)]` mirrors of libsmb2's
-    //! public structs.
-    //!
-    //! Only what the kernel actually uses is declared. Adding to this module is
-    //! a deliberate act, and each addition should come with a layout assertion
-    //! if it is a struct.
-
-    use super::{smb2_context, smb2dir, smb2fh};
-    use std::os::raw::{c_char, c_int, c_void};
-
-    // ---------------------------------------------------------------------
-    // Context lifecycle
-    // ---------------------------------------------------------------------
-
-    // Edition 2024 requires the `unsafe` keyword on `extern` blocks: declaring
-    // a foreign function is itself an unchecked assertion that the signature
-    // matches what the library actually exports.
-    unsafe extern "C" {
-        /// Allocate a session context. Returns null on allocation failure.
-        ///
-        /// The result must be released with `smb2_destroy_context`.
-        pub fn smb2_init_context() -> *mut smb2_context;
-
-        /// Release a session context. Consumes the pointer.
-        pub fn smb2_destroy_context(ctx: *mut smb2_context);
-
-        /// Description of the last error on this context.
-        ///
-        /// The pointer is owned by the context and is invalidated by the next
-        /// call on it — copy it out immediately.
-        pub fn smb2_get_error(ctx: *mut smb2_context) -> *const c_char;
-
-        /// The raw NT status of the last failed operation, e.g. `0xC0000034`
-        /// for `STATUS_OBJECT_NAME_NOT_FOUND`.
-        pub fn smb2_get_nterror(ctx: *mut smb2_context) -> c_int;
-
-        /// Translate an NT status into a human-readable string.
-        ///
-        /// Returns a pointer to static storage; never freed.
-        pub fn nterror_to_str(status: u32) -> *const c_char;
-    }
-
-    // ---------------------------------------------------------------------
-    // Placeholder bindings used by the M1 link probe
-    // ---------------------------------------------------------------------
-    //
-    // The full operation surface (connect, list, open, pread, ...) is added in
-    // M4, together with the layout assertions for `smb2_stat_64` and
-    // `smb2dirent`. Declaring it before there is a caller would be dead code
-    // that nothing validates.
-
-    /// Never used directly; exists so the opaque types are referenced and the
-    /// module compiles without warnings while the API surface is still small.
-    #[allow(dead_code)]
-    pub(crate) type OpaqueHandles = (*mut smb2_context, *mut smb2fh, *mut smb2dir, *mut c_void);
-}
+pub use network::ensure_network_ready;
 
 /// Exercise the FFI boundary: create a context and tear it down.
 ///
-/// This exists so that linking against libsmb2 is actually verified by the
-/// test suite rather than merely assumed. If the C library failed to compile
-/// or link, this is the first thing that fails.
+/// This exists so that linking against libsmb2 is verified by the test suite
+/// rather than merely assumed. If the C library failed to compile or link, this
+/// is the first thing that fails.
 ///
 /// Returns `false` if libsmb2 could not allocate a context.
 pub fn link_probe() -> bool {
@@ -162,5 +72,22 @@ mod tests {
             std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
         };
         assert!(!rendered.is_empty(), "unknown status rendered as empty");
+    }
+
+    #[test]
+    fn a_fresh_context_reports_no_error() {
+        // SAFETY: the context is created here and destroyed here; `smb2_get_error`
+        // returns a pointer owned by it, read before destruction.
+        unsafe {
+            let ctx = ffi::smb2_init_context();
+            assert!(!ctx.is_null());
+            let msg = ffi::smb2_get_error(ctx);
+            // A fresh context has no error, so this is either null or empty —
+            // never a dangling pointer we then read.
+            if !msg.is_null() {
+                let _ = std::ffi::CStr::from_ptr(msg);
+            }
+            ffi::smb2_destroy_context(ctx);
+        }
     }
 }

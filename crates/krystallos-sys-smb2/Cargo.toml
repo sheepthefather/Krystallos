@@ -12,6 +12,11 @@ build = "build.rs"
 
 [dependencies]
 
+[target.'cfg(windows)'.dependencies]
+# For `WSAStartup` and the real `WSADATA` layout. Declaring that struct by hand
+# would be guessing at a hundred version-dependent fields we never read.
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+
 [build-dependencies]
 cmake = "0.1"
 dunce = "1"
