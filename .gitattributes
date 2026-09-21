@@ -1,0 +1,19 @@
+# Normalise line endings on commit, and check out LF everywhere except where a
+# platform genuinely requires CRLF. Without this, a Windows checkout rewrites
+# every file and every diff shows whole-file churn.
+* text=auto eol=lf
+
+# Windows-only scripts need CRLF to run under cmd.exe.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary-ish files git should never try to normalise.
+*.png binary
+*.jpg binary
+*.so binary
+*.a binary
+*.dll binary
+*.lib binary
+
+# Generated FFI bindings would be noise in diffs and in review.
+/crates/krystallos-sys-smb2/src/bindings.rs linguist-generated=true
