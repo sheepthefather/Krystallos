@@ -287,10 +287,9 @@ llvm-nm <out>/arm64-v8a/libkrystallos_ffi.so | grep smb2_init_context
 ### HyalosPlayer 侧
 
 - **播放引擎：Media3 1.11.x**（Apache-2.0）。不用 libVLC（其 SMB 支持仅到 SMBv1，基于 libdsm）。
-- **数据面桥接：UniFFI + 直接 `DataSource`**，不用「Rust 内起本地 HTTP server」。理由：少一层 IPC、无端口/鉴权/后台被杀风险；配合预读后 JNI 调用约 12 次/秒（100 Mbps 4K），开销可忽略。
+- **数据面桥接：UniFFI + 直接 `DataSource`**，不用「Rust 内起本地 HTTP server」。理由：少一层 IPC、无端口/鉴权/后台被杀风险。
 - **`DataSource` 内部必须做 MB 级预读缓冲，绝不能把调用方的 `readLength` 透传到 SMB 层。** 这是 SMB 场景的头号性能杀手：社区实测有自定义 DataSource 被以 `readLength == 1` 连续调用 60 万次以上，初始化耗时数分钟。
-- **UniFFI 的门面形状**：控制面用 `suspend fun`；数据面用**同步** `readInto(offset, ByteBuffer)`，因为零拷贝 `&[u8]` 不能用在 async 函数里（必须是 direct buffer、只能 Kotlin→Rust 单向、不能嵌套在其他类型里）。
-- **UniFFI 不支持取消**。Kotlin 的 `Job.cancel()` 不会传到 Rust，长连接的断开与超时必须由 Krystallos 自己用标志位 + 错误变体实现协作式取消。
+- **UniFFI 不支持取消**。Kotlin 的 `Job.cancel()` 不会传到 Rust。目前可接受，因为每个操作都受 libsmb2 的超时约束（`DEFAULT_TIMEOUT_SECS`），但 UI 上的「取消」实际含义是「不再等待」而非「停止工作」。
 
 ### 已确认的产品决策
 
@@ -301,6 +300,59 @@ llvm-nm <out>/arm64-v8a/libkrystallos_ffi.so | grep smb2_init_context
 ### 许可证
 
 两个仓库均为 **GPL-3.0**。选 3.0 而非 2.0 有两个硬理由：libsmb2 是 **LGPL-2.1-or-later**（可选 LGPL-3.0 条款，与 GPL-3.0 兼容，与 GPL-2.0-only 不兼容）；将来的 Media3 是 Apache-2.0（与 GPL-3.0 兼容，与 GPL-2.0 不兼容）。
+
+---
+
+## FFI 门面
+
+`krystallos-ffi` 是 Android 侧唯一会看到的接口，用 UniFFI 0.32 的 proc-macro 模式声明。
+
+### 三个对象，而非一个
+
+它们有真正不同的生命周期，值得在 Kotlin 侧可见：
+
+| 对象 | 生命周期 | 说明 |
+|---|---|---|
+| `Kernel` | 每进程一个 | 持有 backend 注册表，`connect` 的入口 |
+| `Session` | 一次连接 | 打开即认证，关闭即断开 |
+| `RemoteFile` | 依附于 Session | 句柄只在 Session 存活期间有效 |
+
+### 数据面为什么是 async 而不是同步 `readInto(ByteBuffer)`
+
+原计划是同步的 `readInto(offset, ByteBuffer)`，基于「UniFFI 的 `&[u8]` 零拷贝能用在参数上」这个判断。**这个判断有一半是错的**：文档原文是 "Direction: `&[u8]` only flows foreign → Rust"，且**不存在 `&mut [u8]` 对应物**。UniFFI 无法让 Rust 写进调用方的缓冲区。
+
+所以读操作只能返回 owned bytes，边界上必然有一次拷贝。**一旦拷贝无法避免，同步签名就买不到任何东西，反而丢掉了 await 的能力。** 因此 `read_at` 是 async 的，返回 `ByteRange { offset, data: Vec<u8> }`。
+
+代价小到不值得绕开：100 Mbps 的 4K 流约 12 MiB/s，按 1 MiB 分块是每秒约 12 次拷贝，而它们背后的网络往返以毫秒计。
+
+**返回 record 而非裸 `Vec<u8>`** 也留了余地：将来要加字段（比如实际服务的 offset）不必改签名。
+
+### 错误类型为什么独立于 `krystallos_core::Error`
+
+内核的错误模型应该随内核自由演进。**凡是通过 UniFFI 导出的东西都成为已发布 API**——Kotlin 侧已经写好的代码依赖它。直接绑定两者意味着内核的任何重构都是 Android 侧的破坏性变更。
+
+因此边界有自己的 `KernelError`，映射显式且可测试。它也只携带调用方能据以行动的信息：`Io(std::io::Error)` 在 Kotlin 侧没有意义，而 `ConnectionLost` 与 `NotFound` 的区别正是 UI 需要的——一个意味着「提示重连」，另一个意味着「那个文件没了」。
+
+### 绑定生成
+
+UniFFI 没有 Gradle 插件，生成是独立一步，读取编译好的 `.so` 并产出一个自包含的 `.kt`。
+
+用 `cargo run -p krystallos-ffi --bin uniffi-bindgen` 而非全局安装的 `uniffi-bindgen`，**目的是让生成器的版本被 `Cargo.lock` 锁住**，不会与构建库时的 `uniffi` 版本漂移。版本不匹配会产出「能编译、运行时才炸」的绑定，那是个很糟糕的下午。
+
+```bash
+cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -P 29 -o target/jniLibs build --release -p krystallos-ffi
+
+cargo run -p krystallos-ffi --bin uniffi-bindgen -- \
+    generate --library target/jniLibs/arm64-v8a/libkrystallos_ffi.so \
+    --language kotlin --out-dir target/generated/kotlin
+```
+
+**Android 侧的两个必备项**（已查证，不是可选项）：
+
+1. JNA 依赖必须用 **aar** 变体：`net.java.dev.jna:jna:<ver>@aar`。用普通 jar 会在运行时 `UnsatisfiedLinkError`（找不到 `libjnidispatch.so`）。
+2. 若开了 minify，加 `-keep class com.sun.jna.** { *; }`。
+
+有 async 函数时还需要 `kotlinx-coroutines-core`。
 
 ---
 

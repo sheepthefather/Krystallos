@@ -8,7 +8,7 @@ Krystallos 把远程存储呈现为一套类似本地文件系统的接口：连
 
 ## 当前状态
 
-**SMB2/3 后端已可用**：抽象层、本地后端、SMB 后端、调试 CLI 均已实现并通过测试（含对真实共享的集成测试与后端间差分测试）。文件读写（`open`/`read`/`write`）尚未实现。
+**内核已完整可用**：抽象层、本地后端、SMB2/3 后端、调试 CLI、UniFFI 门面均已实现并通过测试（含对真实共享的集成测试与后端间差分测试）。
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
@@ -16,9 +16,11 @@ Krystallos 把远程存储呈现为一套类似本地文件系统的接口：连
 | M2 | `krystallos-core` 抽象层 | ✅ |
 | M3 | `krystallos-local` + `krystallos-cli` | ✅ |
 | M4 | SMB 连接、列举、stat、目录操作 | ✅ |
-| M5 | SMB 文件读写 + 大文件差分测试 | ⬜ |
-| M6 | 预读缓存 | ⬜ |
-| M7 | UniFFI 门面 | ⬜ |
+| M5 | SMB 文件读写 | ✅ |
+| M7 | UniFFI 门面 + Kotlin 绑定生成 | ✅ |
+| M6 | 预读缓存 | ⬜ 待按真实负载设计 |
+
+M6 被有意押后：原计划做预读是为了掩盖延迟，但实测显示未加密路径已有约 250 MB/s、每次读 4 ms，收益不足以支撑它的复杂度。等真有播放器负载时再按需设计。
 
 ## 快速开始
 
@@ -94,6 +96,20 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -P 29 \
 `-P 29` 不要省略——cargo-ndk 默认按 API 21 构建，低于本项目 minSdk。
 
 **构建还需要 CMake 3.x 或 4.x。** libsmb2 用它生成平台相关的 `config.h`，绕不过去；原因见 [ARCHITECTURE.md](ARCHITECTURE.md#为什么是-cmake-而不是-cc)。
+
+### 生成 Kotlin 绑定
+
+UniFFI 没有 Gradle 插件，绑定生成是独立一步，读取编译好的 `.so`：
+
+```bash
+cargo run -p krystallos-ffi --bin uniffi-bindgen -- \
+    generate --library target/jniLibs/arm64-v8a/libkrystallos_ffi.so \
+    --language kotlin --out-dir target/generated/kotlin
+```
+
+产出一个自包含的 `krystallos_ffi.kt`。用 `cargo run` 而不是全局安装的 `uniffi-bindgen`，是为了让生成器版本被 `Cargo.lock` 锁住，不会与构建库时的版本漂移——不匹配会产出「能编译、运行时才炸」的绑定。
+
+**Android 工程侧的两个必备项**：JNA 依赖必须用 aar 变体（`net.java.dev.jna:jna:<ver>@aar`），否则运行时 `UnsatisfiedLinkError`；有 async 函数时需要 `kotlinx-coroutines-core`。
 
 ## 仓库结构
 

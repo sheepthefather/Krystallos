@@ -61,7 +61,11 @@ fn parse_root(rest: &str) -> Result<PathBuf> {
 }
 
 /// The inverse of [`parse_root`]: render a canonical root as a `file://` URI.
-pub(crate) fn uri_for(root: &Path) -> String {
+///
+/// Public because building a valid `file://` endpoint by hand is easy to get
+/// wrong on Windows — the drive letter needs a third slash, and the separators
+/// have to be forward slashes — so callers are better off asking than guessing.
+pub fn uri_for(root: &Path) -> String {
     let s = root.to_string_lossy().replace('\\', "/");
     if s.starts_with('/') {
         // Already absolute in URI terms: `/home/u` -> `file:///home/u`

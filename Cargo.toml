@@ -21,4 +21,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+# `debuginfo`, not `true`. A full strip removes `.symtab` as well, and UniFFI's
+# metadata symbols live there — they are read-only data, not exported dynamic
+# symbols, so `.dynsym` does not carry them. With a full strip, `uniffi-bindgen
+# generate --library` fails with "No UniFFI metadata found" on the very artifact
+# that ships, while succeeding on a debug build, which is a confusing way to
+# lose an afternoon.
+#
+# Keeping `.symtab` also keeps native crash reports symbolisable, and Android's
+# own build strips the library again when packaging.
+strip = "debuginfo"

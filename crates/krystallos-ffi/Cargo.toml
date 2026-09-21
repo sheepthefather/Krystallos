@@ -9,8 +9,27 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
+# `cdylib` is the artifact Android loads. `rlib` is kept so the facade can be
+# exercised by Rust tests and by the bindgen binary without a second crate.
 crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+# Generates the Kotlin bindings. See `src/bin/uniffi-bindgen.rs`.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
 
 [dependencies]
 krystallos-core.workspace = true
+krystallos-local.workspace = true
+krystallos-smb = { path = "../krystallos-smb" }
 krystallos-sys-smb2 = { path = "../krystallos-sys-smb2" }
+thiserror.workspace = true
+tokio.workspace = true
+
+# `tokio` enables the async runtime UniFFI hands futures to; without it every
+# exported `async fn` fails to compile. `cli` pulls in the argument parsing the
+# `uniffi-bindgen` binary needs.
+uniffi = { version = "0.32", features = ["tokio", "cli"] }
+
+[dev-dependencies]
+tempfile = "3"

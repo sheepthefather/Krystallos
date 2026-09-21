@@ -32,4 +32,4 @@ mod backend;
 mod driver;
 
 pub use backend::LocalBackend;
-pub use driver::LocalDriver;
+pub use driver::{uri_for, LocalDriver};
