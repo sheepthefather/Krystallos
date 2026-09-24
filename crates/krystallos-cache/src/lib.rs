@@ -189,10 +189,25 @@ impl<H: FileHandle> ReadAhead<H> {
         // not a full megabyte of which most is past the end.
         let len = self.window_size.min(self.remaining_from(start));
 
+        // Loop until the window is full or the handle returns nothing. A short
+        // read is *not* end-of-file: libsmb2 shrinks a READ to what the granted
+        // credits cover (`lib/libsmb2.c`, `smb2_pread_async`), so it returns
+        // short reads mid-file as a matter of course. Only an empty read proves
+        // the file ended.
         let mut buf = vec![0u8; len];
-        let n = self.read_through(start, &mut buf).await?;
-        buf.truncate(n);
-        let hit_eof = n == 0 || (len > 0 && n < len);
+        let mut filled = 0usize;
+        let mut hit_eof = false;
+        while filled < len {
+            let n = self
+                .read_through(start + filled as u64, &mut buf[filled..])
+                .await?;
+            if n == 0 {
+                hit_eof = true;
+                break;
+            }
+            filled += n;
+        }
+        buf.truncate(filled);
 
         let mut w = self.state.lock().expect("read-ahead window poisoned");
         w.start = start;
@@ -610,6 +625,56 @@ mod tests {
         let mut buf = vec![0u8; 8192];
         handle.read_exact_at(0, &mut buf).await.unwrap();
         assert_eq!(buf, data, "a stale length must not truncate the result");
+    }
+
+    #[tokio::test]
+    async fn a_short_read_mid_file_is_not_mistaken_for_end_of_file() {
+        // libsmb2 quietly shrinks a READ to what the granted credits cover —
+        // 64 KiB per credit, and 64 KiB flat on SMB 2.0.2 — so a short read in
+        // the middle of a file is routine, not a sign that the file ended.
+        // Treating it as end-of-file would make everything past the first
+        // short fetch read back as zero bytes: a truncated movie.
+        struct CappedHandle(Vec<u8>);
+
+        #[async_trait]
+        impl FileHandle for CappedHandle {
+            async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+                let start = (offset as usize).min(self.0.len());
+                let n = (self.0.len() - start).min(buf.len()).min(1000);
+                buf[..n].copy_from_slice(&self.0[start..start + n]);
+                Ok(n)
+            }
+            async fn write_at(&self, _o: u64, _b: &[u8]) -> Result<usize> {
+                Err(Error::backend("read-only"))
+            }
+            async fn set_len(&self, _l: u64) -> Result<()> {
+                Err(Error::backend("read-only"))
+            }
+            async fn flush(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn close(&self) -> Result<()> {
+                Ok(())
+            }
+            fn len(&self) -> u64 {
+                self.0.len() as u64
+            }
+        }
+
+        let data = payload(20_000);
+        let handle = ReadAhead::with_window(CappedHandle(data.clone()), 4096);
+
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = handle.read_at(out.len() as u64, &mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(out.len(), data.len(), "the file was cut short");
+        assert_eq!(out, data);
     }
 
     #[tokio::test]

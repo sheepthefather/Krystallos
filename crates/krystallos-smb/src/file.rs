@@ -121,22 +121,15 @@ impl Drop for RemoteFile {
         // silently leaking a server-side handle until the session ends is worse
         // than firing and forgetting.
         //
-        // The command is sent on a clone of the session handle, so it is
-        // queued even though `self.session` is about to go away. If the session
-        // thread has already exited the send fails, which is fine — the server
-        // releases the handle when the session tears down, and
-        // `OpenFiles::close_all` sweeps up anything still open at shutdown.
+        // The close is queued synchronously on the command channel rather than
+        // spawned as a task. Through the FFI this `Drop` runs on whatever thread
+        // released the Kotlin object — a finalizer thread, typically — where
+        // there is no tokio runtime to spawn onto, and a spawn-based close was
+        // silently skipped there. Queuing needs no runtime. If the session
+        // thread has already exited the send fails, which is fine:
+        // `OpenFiles::close_all` released everything on the way out.
         if !self.closed.swap(true, Ordering::AcqRel) {
-            let session = self.session.clone();
-            let id = self.id;
-            // `close` is async and `Drop` is not, so it is submitted as a
-            // detached task. Outside a runtime there is nothing to submit to,
-            // and the handle is reclaimed at session teardown instead.
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    let _ = session.close(id).await;
-                });
-            }
+            self.session.close_detached(self.id);
         }
     }
 }

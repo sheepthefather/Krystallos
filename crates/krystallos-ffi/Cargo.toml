@@ -33,3 +33,5 @@ uniffi = { version = "0.32", features = ["tokio", "cli"] }
 
 [dev-dependencies]
 tempfile = "3"
+# For the test handles that stand in for a backend's `FileHandle`.
+async-trait.workspace = true

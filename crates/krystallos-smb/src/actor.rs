@@ -381,6 +381,20 @@ impl Session {
         self.call(|reply| Command::Close { id, reply }).await
     }
 
+    /// Queue a close without waiting for it.
+    ///
+    /// For `Drop`, which cannot await and may run on any thread — including a
+    /// JVM finalizer thread with no async runtime in sight. Sending on the
+    /// command channel is synchronous and never blocks, so no runtime is
+    /// needed; the reply is simply dropped, and the session thread ignores a
+    /// reply nobody is waiting for.
+    pub(crate) fn close_detached(&self, id: u64) {
+        let (reply, _) = oneshot::channel();
+        // A failed send means the session thread is gone, and `close_all`
+        // has already released every handle it held.
+        let _ = self.inner.tx.send(Command::Close { id, reply });
+    }
+
     pub(crate) async fn read_at(&self, id: u64, offset: u64, len: u32) -> Result<Vec<u8>> {
         self.call(|reply| Command::ReadAt {
             id,
@@ -942,6 +956,61 @@ mod tests {
         assert!(files.take(a).is_some());
         assert!(files.get(a).is_none(), "a taken handle must be gone");
         assert!(files.get(b).is_some(), "taking one must not disturb another");
+    }
+
+    /// A session whose "thread" is the returned receiver, so a test can see
+    /// exactly which commands were sent without a server.
+    fn session_with_inbox() -> (Session, Receiver<Command>) {
+        let (tx, rx) = mpsc::channel();
+        let session = Session {
+            inner: Arc::new(SessionInner {
+                tx,
+                join: Mutex::new(None),
+                max_read_size: 65536,
+                max_write_size: 65536,
+            }),
+        };
+        (session, rx)
+    }
+
+    #[test]
+    fn dropping_a_file_outside_any_runtime_still_closes_it() {
+        // A plain `#[test]`, not `#[tokio::test]`, on purpose: through the FFI
+        // a file is dropped on whichever thread released the Kotlin object,
+        // which has no runtime. A close that needed one was silently skipped
+        // there, leaving the server-side handle open until disconnect.
+        let (session, inbox) = session_with_inbox();
+        let file = RemoteFile::new(session, 7, 0, VfsPath::new("/a.mkv").unwrap());
+        drop(file);
+
+        match inbox.try_recv() {
+            Ok(Command::Close { id, .. }) => assert_eq!(id, 7),
+            Ok(_) => panic!("dropping a file sent something other than a close"),
+            Err(e) => panic!("dropping a file sent no close: {e}"),
+        }
+        assert!(inbox.try_recv().is_err(), "exactly one close per file");
+    }
+
+    #[tokio::test]
+    async fn an_explicit_close_is_not_repeated_by_drop() {
+        let (session, inbox) = session_with_inbox();
+        // Answer the explicit close the way the session thread would.
+        let responder = thread::spawn(move || {
+            let mut closes = 0;
+            while let Ok(command) = inbox.recv() {
+                if let Command::Close { reply, .. } = command {
+                    closes += 1;
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            closes
+        });
+
+        let file = RemoteFile::new(session, 3, 0, VfsPath::new("/a.mkv").unwrap());
+        krystallos_core::FileHandle::close(&file).await.unwrap();
+        drop(file);
+
+        assert_eq!(responder.join().unwrap(), 1, "close then drop must close once");
     }
 
     #[test]

@@ -244,12 +244,7 @@ impl Session {
         self.ensure_open()?;
         let vpath = self.path(&path)?;
         let handle = self.backend.open(&vpath, flags.into()).await?;
-        Ok(Arc::new(RemoteFile {
-            handle: Some(Arc::from(handle)),
-            path,
-            len: std::sync::atomic::AtomicU64::new(0),
-            closed: AtomicBool::new(false),
-        }))
+        Ok(Arc::new(RemoteFile::new(path, Arc::from(handle))))
     }
 
     /// Disconnect from the endpoint.
@@ -277,16 +272,14 @@ impl Session {
 ///
 /// # Closing
 ///
-/// [`RemoteFile::close`] is explicit and idempotent. Dropping the Kotlin object
-/// also releases the handle — UniFFI calls `Drop` when the Kotlin object is
-/// garbage-collected — but that timing is the garbage collector's, not the
+/// [`RemoteFile::release`] is explicit and idempotent. Dropping the Kotlin
+/// object also releases the handle — UniFFI calls `Drop` when the Kotlin object
+/// is garbage-collected — but that timing is the garbage collector's, not the
 /// caller's, and on a server that limits concurrent open files the difference
-/// matters. Close when you are done.
+/// matters. Release when you are done.
 #[derive(uniffi::Object)]
 pub struct RemoteFile {
-    /// `None` once closed. Taking it is what makes closing idempotent without
-    /// a lock: `Option::take` on `&mut self` under UniFFI's exclusive borrow.
-    handle: Option<Arc<dyn krystallos_core::FileHandle>>,
+    handle: Arc<dyn krystallos_core::FileHandle>,
     path: String,
     /// Size as last observed. Cached so `len` can be a plain getter rather than
     /// an async call, which is what a caller wants for sizing a buffer.
@@ -320,20 +313,28 @@ impl RemoteFile {
 
     /// Read up to `len` bytes starting at `offset`.
     ///
-    /// Returns fewer bytes than asked for only at end-of-file, where the result
-    /// is empty. There is no separate end-of-file error: a short or empty
-    /// result is the signal.
+    /// Returns fewer bytes than asked for only at end-of-file. There is no
+    /// separate end-of-file error: a short or empty result is the signal.
     ///
-    /// Reads larger than the negotiated maximum are split by the backend, so
-    /// asking for more than one mebibyte is fine.
+    /// That promise is kept here rather than inherited: backends return short
+    /// reads mid-file routinely — SMB caps each READ at the negotiated maximum,
+    /// and libsmb2 shrinks it further to what the granted credits cover — so
+    /// this loops until `len` bytes arrive or the backend returns nothing.
+    /// Asking for more than one mebibyte is therefore fine.
     pub async fn read_at(&self, offset: u64, len: u32) -> Result<ByteRange> {
         let handle = self.handle()?;
-        if len == 0 {
-            return Ok(ByteRange::new(offset, Vec::new()));
-        }
         let mut buf = vec![0u8; len as usize];
-        let n = handle.read_at(offset, &mut buf).await?;
-        buf.truncate(n);
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            let n = handle
+                .read_at(offset + filled as u64, &mut buf[filled..])
+                .await?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        buf.truncate(filled);
         Ok(ByteRange::new(offset, buf))
     }
 
@@ -392,23 +393,33 @@ impl RemoteFile {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        // Cloning the handle out and dropping our reference is what actually
-        // closes it: `RemoteFile` in `krystallos-smb` releases on its own
-        // `Drop`, which runs as soon as the last `Arc` goes.
-        let handle = self.handle.clone();
-        drop(handle);
-        Ok(())
+        // Closed through the handle, not by dropping our reference: this
+        // object still holds the `Arc`, so a drop here would release nothing
+        // until the Kotlin object is garbage-collected.
+        match self.handle.close().await {
+            // A lost connection takes every server-side handle with it, so the
+            // file is released either way — the thing the caller asked for.
+            Ok(()) | Err(krystallos_core::Error::ConnectionLost { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
 impl RemoteFile {
+    fn new(path: String, handle: Arc<dyn krystallos_core::FileHandle>) -> Self {
+        RemoteFile {
+            len: std::sync::atomic::AtomicU64::new(handle.len()),
+            handle,
+            path,
+            closed: AtomicBool::new(false),
+        }
+    }
+
     fn handle(&self) -> Result<Arc<dyn krystallos_core::FileHandle>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(already_closed("file"));
         }
-        self.handle
-            .clone()
-            .ok_or_else(|| already_closed("file"))
+        Ok(self.handle.clone())
     }
 }
 
@@ -598,6 +609,95 @@ mod tests {
             Err(KernelError::ConnectionLost { .. }) => {}
             other => panic!("expected ConnectionLost, got {other:?}"),
         }
+    }
+
+    /// A handle that serves at most 1000 bytes per read, the way libsmb2 caps
+    /// a READ to its credits, and counts how often it is closed.
+    struct CappedHandle {
+        data: Vec<u8>,
+        closes: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl krystallos_core::FileHandle for CappedHandle {
+        async fn read_at(&self, offset: u64, buf: &mut [u8]) -> krystallos_core::Result<usize> {
+            let start = (offset as usize).min(self.data.len());
+            let n = (self.data.len() - start).min(buf.len()).min(1000);
+            buf[..n].copy_from_slice(&self.data[start..start + n]);
+            Ok(n)
+        }
+        async fn write_at(&self, _o: u64, _b: &[u8]) -> krystallos_core::Result<usize> {
+            Err(krystallos_core::Error::backend("read-only"))
+        }
+        async fn set_len(&self, _l: u64) -> krystallos_core::Result<()> {
+            Err(krystallos_core::Error::backend("read-only"))
+        }
+        async fn flush(&self) -> krystallos_core::Result<()> {
+            Ok(())
+        }
+        async fn close(&self) -> krystallos_core::Result<()> {
+            self.closes.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+        fn len(&self) -> u64 {
+            self.data.len() as u64
+        }
+    }
+
+    fn capped(len: usize) -> (RemoteFile, Arc<CappedHandle>, Vec<u8>) {
+        let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let handle = Arc::new(CappedHandle {
+            data: data.clone(),
+            closes: Default::default(),
+        });
+        let file = RemoteFile::new("/capped".to_string(), handle.clone());
+        (file, handle, data)
+    }
+
+    #[tokio::test]
+    async fn read_at_fills_the_request_across_short_backend_reads() {
+        // The Kotlin side is told a short result means end-of-file. The
+        // backend makes no such promise — SMB returns short reads mid-file —
+        // so the facade has to loop, or a DataSource would stop early.
+        let (file, _, data) = capped(5000);
+
+        let r = file.read_at(0, 4096).await.expect("read");
+        assert_eq!(r.len(), 4096, "a short backend read leaked through");
+        assert_eq!(r.data, data[..4096]);
+
+        // Straddling the end: everything that exists, then nothing.
+        let r = file.read_at(4096, 4096).await.expect("read tail");
+        assert_eq!(r.data, data[4096..]);
+        assert!(file.read_at(5000, 16).await.expect("read at eof").is_empty());
+    }
+
+    #[tokio::test]
+    async fn release_closes_the_underlying_handle_exactly_once() {
+        // Releasing must reach the backend now, not whenever the Kotlin object
+        // is garbage-collected — this object still holds the handle.
+        let (file, handle, _) = capped(10);
+        file.release().await.expect("release");
+        file.release().await.expect("release again");
+        assert_eq!(handle.closes.load(Ordering::Acquire), 1);
+        assert!(file.is_closed());
+    }
+
+    #[tokio::test]
+    async fn len_reports_the_size_seen_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("five"), b"12345").unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let session = kernel()
+            .connect(ConnectRequest::new(krystallos_local::uri_for(&canonical)))
+            .await
+            .expect("connect");
+
+        let file = session
+            .open("/five".to_string(), OpenFlags::read_only())
+            .await
+            .expect("open");
+        assert_eq!(file.len(), 5);
+        assert!(!file.is_empty());
     }
 
     #[tokio::test]
