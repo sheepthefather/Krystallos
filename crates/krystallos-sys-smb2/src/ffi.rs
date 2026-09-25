@@ -396,6 +396,14 @@ unsafe extern "C" {
     /// Largest single read the negotiated dialect permits. Reads must be split
     /// to this size; it varies with the server and with SMB 3.1.1's
     /// multi-credit grants.
+    /// The dialect the server and client settled on
+    /// (`libsmb2.h:374`).
+    ///
+    /// An `SMB2_VERSION_*` constant — `0x0311` is SMB 3.1.1 — or `0`/`0x02FF`
+    /// before a connection is made. It does not change afterwards, so reading it
+    /// once after connecting is enough.
+    pub fn smb2_get_dialect(smb2: *mut smb2_context) -> u16;
+
     pub fn smb2_get_max_read_size(smb2: *mut smb2_context) -> u32;
 
     pub fn smb2_get_max_write_size(smb2: *mut smb2_context) -> u32;

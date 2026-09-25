@@ -416,6 +416,35 @@ async fn read_all(backend: &dyn krystallos_core::StorageBackend, path: &VfsPath)
     out
 }
 
+/// The diagnostics screen's data: what the handshake settled on.
+#[tokio::test]
+async fn a_session_reports_what_it_negotiated() {
+    let _guard = fixture_lock().lock().await;
+    let live = require_share!();
+    let backend = registry()
+        .connect(&live.uri, &live.credentials)
+        .await
+        .expect("connect");
+
+    // Reached the way the FFI reaches it: through the escape hatch, because a
+    // dialect is SMB's idea and does not belong on the portable contract.
+    let smb = backend
+        .as_any()
+        .downcast_ref::<krystallos_smb::SmbBackend>()
+        .expect("this is the SMB backend");
+
+    let info = smb.info();
+    assert!(
+        info.dialect >= 0x0202,
+        "a connected session should report a real dialect, got {:#06x}",
+        info.dialect
+    );
+    assert!(info.max_read_size > 0, "no read size was negotiated");
+    assert!(info.max_write_size > 0, "no write size was negotiated");
+
+    backend.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test]
 async fn a_written_file_reads_back_byte_for_byte() {
     let _guard = fixture_lock().lock().await;

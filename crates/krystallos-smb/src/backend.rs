@@ -1,4 +1,4 @@
-use crate::actor::{ConnectConfig, Session};
+use crate::actor::{ConnectConfig, Session, SmbInfo};
 use crate::DEFAULT_TIMEOUT_SECS;
 use async_trait::async_trait;
 use krystallos_core::{
@@ -147,6 +147,21 @@ impl StorageBackend for SmbBackend {
     async fn shutdown(&self) -> Result<()> {
         self.session.shutdown().await
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl SmbBackend {
+    /// What this connection negotiated.
+    ///
+    /// Specific to SMB, which is why it is reached through
+    /// [`StorageBackend::as_any`](krystallos_core::StorageBackend::as_any)
+    /// rather than added to the portable contract.
+    pub fn info(&self) -> SmbInfo {
+        self.session.info()
+    }
 }
 
 /// Opens [`SmbBackend`] sessions for `smb://` endpoints.
@@ -202,11 +217,13 @@ impl BackendDriver for SmbDriver {
         // file costs, which is the difference between a fast transfer and a
         // slow one. Worth being able to see without a packet capture.
         if std::env::var_os("KRYSTALLOS_DEBUG").is_some() {
+            let info = session.info();
             eprintln!(
-                "krystallos: {} negotiated max_read={} KiB max_write={} KiB",
+                "krystallos: {} negotiated dialect=0x{:04x} max_read={} KiB max_write={} KiB",
                 parsed.label(),
-                session.max_read_size() / 1024,
-                session.max_write_size() / 1024,
+                info.dialect,
+                info.max_read_size / 1024,
+                info.max_write_size / 1024,
             );
         }
 

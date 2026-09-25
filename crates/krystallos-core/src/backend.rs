@@ -1,5 +1,6 @@
 use crate::{Capabilities, Entry, Error, Metadata, Result, VfsPath};
 use async_trait::async_trait;
+use std::any::Any;
 
 /// How to open a file.
 ///
@@ -297,6 +298,24 @@ pub trait StorageBackend: Send + Sync {
     /// harmless. Unlike [`FileHandle::close`] this consumes nothing, so it can
     /// be invoked through a trait object.
     async fn shutdown(&self) -> Result<()>;
+
+    /// Reach the concrete backend, for things this contract does not cover.
+    ///
+    /// The escape hatch the architecture asks for. A protocol-specific fact —
+    /// SMB's negotiated dialect, say — belongs to that backend; naming it here
+    /// would make every other backend carry a concept it has no equivalent for,
+    /// which is the opposite of what this trait is for. A caller downcasts to
+    /// the type it is interested in and treats anything else as "no answer".
+    ///
+    /// ```
+    /// # use std::any::Any;
+    /// # fn example(backend: &dyn krystallos_core::StorageBackend) -> bool {
+    /// // A local backend has no dialect to report, and says so by not being
+    /// // the type the caller asked for.
+    /// backend.as_any().downcast_ref::<String>().is_none()
+    /// # }
+    /// ```
+    fn as_any(&self) -> &dyn Any;
 }
 
 #[cfg(test)]

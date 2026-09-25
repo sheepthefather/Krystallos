@@ -200,6 +200,35 @@ impl From<OpenFlags> for OpenMode {
     }
 }
 
+/// What an SMB session negotiated, for a diagnostics screen.
+///
+/// Reached through [`Session::smb_info`](crate::Session::smb_info), which
+/// returns `None` for a backend that has nothing to say — so this type being
+/// SMB-shaped does not put an SMB concept into the kernel's portable contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct SmbInfo {
+    /// The negotiated dialect, **as SMB numbers it**: `0x0311` is SMB 3.1.1,
+    /// `0x0202` is SMB 2.0.2.
+    ///
+    /// A number rather than a name because the numbering is the protocol's and
+    /// the wording is the caller's — including its language, which the kernel
+    /// has no business choosing.
+    pub dialect: u16,
+    /// Largest single transfer the connection allows.
+    pub max_read_size: u32,
+    pub max_write_size: u32,
+}
+
+impl From<krystallos_smb::SmbInfo> for SmbInfo {
+    fn from(info: krystallos_smb::SmbInfo) -> Self {
+        SmbInfo {
+            dialect: info.dialect,
+            max_read_size: info.max_read_size,
+            max_write_size: info.max_write_size,
+        }
+    }
+}
+
 /// What a backend can do.
 ///
 /// Protocols are not interchangeable, and this is where that becomes visible to

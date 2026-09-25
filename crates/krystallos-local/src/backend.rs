@@ -229,6 +229,10 @@ impl StorageBackend for LocalBackend {
         // Nothing to tear down: each operation opens and closes its own handle.
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 pub(crate) struct LocalFileHandle {

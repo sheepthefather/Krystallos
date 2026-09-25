@@ -119,6 +119,13 @@ impl SmbContext {
         // SAFETY: read-only query on a live context.
         unsafe { ffi::smb2_get_max_write_size(self.ptr) }
     }
+
+    /// The dialect negotiated during the handshake, as an `SMB2_VERSION_*`
+    /// constant. Fixed once connected.
+    fn dialect(&self) -> u16 {
+        // SAFETY: read-only query on a live context.
+        unsafe { ffi::smb2_get_dialect(self.ptr) }
+    }
 }
 
 impl Drop for SmbContext {
@@ -177,6 +184,20 @@ impl OpenFiles {
             }
         }
     }
+}
+
+/// What an SMB session settled on, for showing to a user.
+///
+/// The fields are the protocol's own vocabulary, which is why this type lives
+/// here and not in `krystallos-core`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmbInfo {
+    /// The negotiated dialect, in SMB's numbering: `0x0311` is SMB 3.1.1,
+    /// `0x0202` is SMB 2.0.2.
+    pub dialect: u16,
+    /// Largest single read the connection allows.
+    pub max_read_size: u32,
+    pub max_write_size: u32,
 }
 
 /// Work sent to the session thread.
@@ -262,6 +283,7 @@ struct SessionInner {
     join: Mutex<Option<JoinHandle<()>>>,
     max_read_size: u32,
     max_write_size: u32,
+    dialect: u16,
 }
 
 impl Session {
@@ -282,6 +304,7 @@ impl Session {
                     join: Mutex::new(Some(join)),
                     max_read_size: limits.max_read,
                     max_write_size: limits.max_write,
+                    dialect: limits.dialect,
                 }),
             }),
             // The thread reported a failure; it has already exited, so joining
@@ -306,6 +329,15 @@ impl Session {
 
     pub(crate) fn max_write_size(&self) -> u32 {
         self.inner.max_write_size
+    }
+
+    /// What this connection negotiated, for a diagnostics screen.
+    pub(crate) fn info(&self) -> SmbInfo {
+        SmbInfo {
+            dialect: self.inner.dialect,
+            max_read_size: self.inner.max_read_size,
+            max_write_size: self.inner.max_write_size,
+        }
     }
 
     /// Send a command and await its reply.
@@ -466,10 +498,14 @@ impl Session {
 // `recv` loop and destroys the context on its own thread. So the only thing
 // `shutdown` adds is waiting for that to finish.
 
-/// Transfer limits reported back once the connection is up.
+/// What the connection settled on, reported back once it is up.
+///
+/// Read once here rather than queried on demand: none of it changes after the
+/// handshake, and a diagnostic screen should not cost a round-trip.
 struct Limits {
     max_read: u32,
     max_write: u32,
+    dialect: u16,
 }
 
 fn actor_thread(
@@ -487,6 +523,7 @@ fn actor_thread(
     let limits = Limits {
         max_read: ctx.max_read_size(),
         max_write: ctx.max_write_size(),
+        dialect: ctx.dialect(),
     };
     let _ = ready.send(Ok(limits));
 
@@ -1257,6 +1294,7 @@ mod tests {
                 join: Mutex::new(None),
                 max_read_size: 65536,
                 max_write_size: 65536,
+                dialect: 0x0311,
             }),
         };
         (session, rx)

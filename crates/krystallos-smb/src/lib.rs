@@ -40,13 +40,14 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-mod actor;
+pub mod actor;
 mod backend;
 mod error;
 mod file;
 mod path;
 
 pub use backend::{SmbBackend, SmbDriver, OPT_SEAL};
+pub use actor::SmbInfo;
 pub use file::RemoteFile;
 
 /// Default per-operation timeout, in seconds.

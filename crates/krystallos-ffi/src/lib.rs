@@ -55,7 +55,7 @@ mod types;
 
 pub use error::KernelError;
 pub use types::{
-    ByteRange, Capabilities, ConnectRequest, DirEntry, EntryMetadata, Kind, OpenFlags,
+    ByteRange, Capabilities, ConnectRequest, DirEntry, EntryMetadata, Kind, OpenFlags, SmbInfo,
 };
 
 use crate::error::Result;
@@ -173,6 +173,24 @@ impl Session {
     /// Whether this session has been closed.
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// What the connection negotiated, when the backend has anything to report.
+    ///
+    /// `None` for a backend with no comparable concept — a local directory has
+    /// no dialect — so a caller shows nothing rather than an empty row.
+    ///
+    /// # Why this is SMB-shaped and not portable
+    ///
+    /// A dialect is SMB's idea, and putting it on the portable backend contract
+    /// would make every other backend carry a concept it has no equivalent for.
+    /// The kernel's answer is the `as_any` escape hatch: this asks for the type
+    /// it is interested in and treats anything else as "no answer".
+    pub fn smb_info(&self) -> Option<SmbInfo> {
+        self.backend
+            .as_any()
+            .downcast_ref::<krystallos_smb::SmbBackend>()
+            .map(|smb| smb.info().into())
     }
 
     /// What this backend can do.
@@ -714,6 +732,21 @@ mod tests {
             .expect("open");
         assert_eq!(file.len(), 5);
         assert!(!file.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_local_session_has_no_smb_info_to_report() {
+        // The escape hatch returning nothing is the point: a local directory has
+        // no dialect, and the caller shows no row rather than an empty one. It
+        // is also what says the portable contract stayed portable.
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let session = kernel()
+            .connect(ConnectRequest::new(krystallos_local::uri_for(&canonical)))
+            .await
+            .expect("connect");
+
+        assert!(session.smb_info().is_none());
     }
 
     #[tokio::test]
