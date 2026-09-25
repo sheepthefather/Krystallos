@@ -744,7 +744,7 @@ fn copy_file(ctx: &SmbContext, from: &VfsPath, to: &VfsPath) -> Result<u64> {
             return Ok(0);
         }
 
-        match copy_server_side(ctx, src.fh, dst.fh, size) {
+        let outcome = match copy_server_side(ctx, src.fh, dst.fh, size) {
             Ok(copied) => Ok(copied),
             Err(CopyFailed::Unsupported) => {
                 // Worth saying out loud, because the difference between the two
@@ -756,7 +756,20 @@ fn copy_file(ctx: &SmbContext, from: &VfsPath, to: &VfsPath) -> Result<u64> {
                 copy_through_here(ctx, src.fh, dst.fh, size)
             }
             Err(CopyFailed::Error(e)) => Err(e),
+        };
+
+        // A copy that fails part-way leaves a short or empty file behind, and
+        // that is worse than leaving nothing: the name is there, the size looks
+        // plausible in a listing, and the only way to find out is to play it and
+        // watch it stop. So the partial destination is removed before the error
+        // is returned. It is ours to remove — it was created here with O_EXCL.
+        if outcome.is_err() {
+            // The handle must go before the unlink: SMB will not remove a file
+            // it still holds open.
+            drop(dst);
+            ffi::smb2_unlink(ctx.ptr(), smb_to.as_ptr());
         }
+        outcome
     }
 }
 

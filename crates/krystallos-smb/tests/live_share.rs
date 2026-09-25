@@ -375,6 +375,24 @@ async fn copying_a_file_is_byte_exact_and_refuses_to_overwrite() {
         "a failed copy left a destination behind"
     );
 
+    // And neither must a copy that fails *after* the destination exists — which
+    // is the case that matters, because the file is already there by then. A
+    // directory is the easiest way to reach it: the source opens, the
+    // destination is created, and the copy itself cannot succeed.
+    let source_dir = p(&format!("/krystallos-copy-dir-{}", std::process::id()));
+    let doomed = p(&format!("/krystallos-copy-doomed-{}", std::process::id()));
+    backend.mkdir(&source_dir).await.expect("mkdir");
+    let _ = backend.remove_file(&doomed).await;
+
+    let failed = backend.copy(&source_dir, &doomed).await;
+    assert!(failed.is_err(), "copying a directory should not succeed");
+    assert!(
+        backend.stat(&doomed).await.is_err(),
+        "a part-way copy left a file behind — it would look like a real film in a listing"
+    );
+
+    backend.remove_dir(&source_dir).await.expect("cleanup src dir");
+
     backend.remove_file(&src).await.expect("cleanup src");
     backend.remove_file(&dst).await.expect("cleanup dst");
     backend.shutdown().await.expect("shutdown");
