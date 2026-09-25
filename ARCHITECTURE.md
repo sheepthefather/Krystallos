@@ -225,6 +225,22 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -P 29 -o <out>/jniLibs build --r
 
 因此边界有自己的 `KernelError`，映射显式且可测试。它也只携带调用方能据以行动的信息：`Io(std::io::Error)` 在 Kotlin 侧没有意义，而 `ConnectionLost` 与 `NotFound` 的区别正是 UI 需要的——一个意味着「提示重连」，另一个意味着「那个文件没了」。
 
+### 协议特有的信息怎么出去
+
+诊断界面要显示 SMB 协商出的方言与块大小，而「方言」是 SMB 自己的词汇。把它加进
+`StorageBackend` 会让 local 后端也背上一个它没有的概念，正是这个 trait 最该避免的事。
+
+因此核心 trait 有一个 **`as_any()` 逃生口**：调用方下转到它关心的那个类型，其它一律
+当作「没有答案」。方言在 `SmbBackend` 上，`krystallos-ffi` 下转去取，local 后端自然
+返回 `None`——界面于是不显示这一行，而不是显示一个空值。有一条测试钉住这件事：
+本地会话的 `smb_info()` 必须是 `None`。
+
+方言在握手后不再变化，所以在连接时读一次存进会话，诊断界面不必为此多一次往返。
+
+**拿不到的东西**：协商后的加密与签名状态。libsmb2 的公开头文件里没有对应的查询，
+所以只能报告「我们请求了什么」，不能报告「实际谈成了什么」。界面上因此不显示加密
+状态，而不是显示一个读不到的值。
+
 ### 绑定生成
 
 UniFFI 没有 Gradle 插件，生成是独立一步，读取编译好的 `.so` 并产出一个自包含的 `.kt`（命令见 [README](README.md#生成-kotlin-绑定)）。用 `cargo run -p krystallos-ffi --bin uniffi-bindgen` 而非全局安装的 `uniffi-bindgen`，**目的是让生成器的版本被 `Cargo.lock` 锁住**，不会与构建库时的 `uniffi` 版本漂移——版本不匹配会产出「能编译、运行时才炸」的绑定。
