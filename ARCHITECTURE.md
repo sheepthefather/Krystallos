@@ -130,6 +130,16 @@ libsmb2 **不调用 `WSAStartup`**——`lib/socket.c:1464` 只是报错说没�
 
 另外 `Auth` 的消息不直接用 libsmb2 的文本：凭证被拒后它的描述往往是**次生症状**（socket 被拆掉），裸着显示会让人去排查网络而不是密码。原始文本保留，但明确标为次要。
 
+### 服务端复制
+
+`StorageBackend::copy` **让服务器在它自己的两个句柄之间搬数据**，字节不经过本进程。SMB 为此提供了文件系统控制：源句柄取一个 *resume key*，再向目标句柄发 COPYCHUNK。对一部几 GB 的影片，这是「几秒」与「几分钟」的区别——客户端循环意味着数据在网络上走两遍。
+
+**ctl_code 必须用 `FSCTL_SRV_COPYCHUNK_WRITE`，不是 `FSCTL_SRV_COPYCHUNK`。** 两个变体不是同义词：Samba 对后者要求目标句柄带 `FILE_READ_DATA`，而以 `O_WRONLY` 打开的句柄永远没有——libsmb2 为它请求的是 `FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES`，仅此而已。用错变体的症状是 `STATUS_ACCESS_DENIED`，且**客户端看不到这个状态**：libsmb2 在解析该错误回复时会失败（`Unexpected size of Error reply. Expected 9, got 8`）并把整个会话判死，于是错误表现为 `ConnectionLost`。是 Samba 自己的日志给出了真正的原因（`fsctl_srv_copychunk_vfs_done: copy chunk failed [NT_STATUS_ACCESS_DENIED]`）。
+
+**服务器不支持时回退到 `pread`/`pwrite` 流式**，回退留在内核内、对上层不可见：调用方要的是「复制」，不是「用某种方式复制」。判定抽成纯函数 `is_copy_unsupported` 并单独测试——漏掉一个状态码会让老服务器上的复制整体失败而不是降级。设置 `KRYSTALLOS_DEBUG` 时回退会打印一行，因为两条路径的代价差着数量级，而结果本身看不出走的哪条。
+
+**只复制单个文件**，递归是调用方的事，与 `remove_dir` 拒绝非空目录同一条原则。**目标已存在时报错而不覆盖**：替换掉一部影片是调用方必须显式做的决定。
+
 ### 加密能力上限
 
 libsmb2 只支持 **AES-128-CCM 加密** 与 **HMAC-SHA256 签名**。`smb2.h` 里定义了 `SMB2_ENCRYPTION_AES_128_GCM`，但 NEGOTIATE 请求里**从不发送它**，`smb3-seal.c` 也从不使用它——常量是死的，只看头文件会误判为支持。

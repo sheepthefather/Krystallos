@@ -303,6 +303,101 @@ fn compare(a: &[Entry], b: &[Entry]) {
     }
 }
 
+/// Copying is server-side, which is the whole reason it is worth having.
+///
+/// This cannot measure whether the bytes travelled through the client — that
+/// needs a packet capture. What it does check is that the copy is byte-exact,
+/// that it refuses to overwrite, and that a refusal leaves the destination as
+/// it was, which together cover the paths this code can get wrong.
+#[tokio::test]
+async fn copying_a_file_is_byte_exact_and_refuses_to_overwrite() {
+    let _guard = fixture_lock().lock().await;
+    let live = require_share!();
+    let backend = registry()
+        .connect(&live.uri, &live.credentials)
+        .await
+        .expect("connect");
+
+    let src = p(&format!("/krystallos-copy-src-{}.bin", std::process::id()));
+    let dst = p(&format!("/krystallos-copy-dst-{}.bin", std::process::id()));
+    let _ = backend.remove_file(&src).await;
+    let _ = backend.remove_file(&dst).await;
+
+    // Bigger than one copy chunk, so the loop in `copy_server_side` has to
+    // advance more than once.
+    let payload: Vec<u8> = (0..2 * 1024 * 1024 + 4096)
+        .map(|i| ((i * 17 + (i >> 5)) % 251) as u8)
+        .collect();
+
+    let handle = backend
+        .open(&src, OpenMode::write().with_truncate())
+        .await
+        .expect("open source for write");
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let n = handle.write_at(offset as u64, &payload[offset..]).await.expect("write");
+        assert!(n > 0);
+        offset += n;
+    }
+    handle.flush().await.expect("flush");
+    handle.close().await.expect("close");
+
+    let copied = backend.copy(&src, &dst).await.expect("copy");
+    assert_eq!(copied, payload.len() as u64, "the copy reported the wrong size");
+
+    let read_back = read_all(backend.as_ref(), &dst).await;
+    assert_eq!(read_back, payload, "the copied bytes differ from the source");
+
+    // Refusing to clobber is deliberate: a paste onto an existing film must not
+    // silently destroy it. libsmb2 reports this through the create path, which
+    // is the message-parsing channel of the error mapper.
+    let err = match backend.copy(&src, &dst).await {
+        Ok(_) => panic!("a copy must not overwrite an existing file"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, krystallos_core::Error::AlreadyExists { .. }),
+        "expected AlreadyExists, got {err:?}"
+    );
+
+    // And the refusal left the first copy untouched rather than truncating it.
+    assert_eq!(
+        read_all(backend.as_ref(), &dst).await,
+        payload,
+        "a refused copy damaged the file that was already there"
+    );
+
+    // Copying something that is not there must not leave an empty destination.
+    let missing = backend.copy(&p("/krystallos-does-not-exist"), &p("/krystallos-never-created")).await;
+    assert!(missing.is_err(), "copying a missing file should fail");
+    assert!(
+        backend.stat(&p("/krystallos-never-created")).await.is_err(),
+        "a failed copy left a destination behind"
+    );
+
+    backend.remove_file(&src).await.expect("cleanup src");
+    backend.remove_file(&dst).await.expect("cleanup dst");
+    backend.shutdown().await.expect("shutdown");
+}
+
+/// Read a whole file through the backend, following short reads.
+async fn read_all(backend: &dyn krystallos_core::StorageBackend, path: &VfsPath) -> Vec<u8> {
+    let handle = backend.open(path, OpenMode::read()).await.expect("open for read");
+    let size = handle.len() as usize;
+    let mut out = vec![0u8; size];
+    let mut offset = 0usize;
+    while offset < size {
+        let n = handle.read_at(offset as u64, &mut out[offset..]).await.expect("read");
+        if n == 0 {
+            break;
+        }
+        offset += n;
+    }
+    out.truncate(offset);
+    handle.close().await.expect("close");
+    out
+}
+
 #[tokio::test]
 async fn a_written_file_reads_back_byte_for_byte() {
     let _guard = fixture_lock().lock().await;

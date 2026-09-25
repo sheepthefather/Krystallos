@@ -266,6 +266,24 @@ pub trait StorageBackend: Send + Sync {
     /// [`Capabilities::atomic_rename`](crate::Capabilities::atomic_rename).
     async fn rename(&self, from: &VfsPath, to: &VfsPath) -> Result<()>;
 
+    /// Copy one file, returning the bytes copied.
+    ///
+    /// **One file, not a tree.** Recursion is the caller's job, for the same
+    /// reason [`StorageBackend::remove_dir`] refuses a non-empty directory: the
+    /// caller gets to decide whether half a copy is useful, and to report which
+    /// part failed.
+    ///
+    /// **Fails if the destination exists.** Overwriting is a decision the
+    /// caller has to make visibly; a backend that quietly replaced a file
+    /// would turn a mis-aimed paste into data loss.
+    ///
+    /// Whether the bytes travel through this process is the backend's business.
+    /// SMB asks the server to copy between its own handles, which for a
+    /// multi-gigabyte film is the difference between seconds and minutes; the
+    /// local backend uses the platform's file copy. Callers get the same
+    /// behaviour either way.
+    async fn copy(&self, from: &VfsPath, to: &VfsPath) -> Result<u64>;
+
     /// Create a directory.
     ///
     /// Only single-level: the parent must exist. Backends should not

@@ -110,6 +110,71 @@ pub struct smb2dirent {
     pub st: smb2_stat_64,
 }
 
+/// Handle identifying a file for a server-side copy (`smb2.h:352`).
+///
+/// Opaque: the server issues it and only the server reads it, so it is carried
+/// as bytes rather than decoded.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct smb2_srv_copychunk_resume_key {
+    pub resume_key: [u8; SMB2_SRV_COPYCHUNK_RESUME_KEY_SIZE],
+}
+
+/// One range to copy (`smb2.h:358`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct smb2_srv_copychunk {
+    pub source_offset: u64,
+    pub target_offset: u64,
+    pub length: u32,
+    pub reserved: u32,
+}
+
+/// What the server actually copied (`smb2.h:365`).
+///
+/// Also how the server reports its limits: when a request exceeds them it
+/// answers with an error *and* fills this in, which is the documented way a
+/// client learns what the server will accept.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct smb2_srv_copychunk_reply {
+    pub chunks_written: u32,
+    pub chunk_bytes_written: u32,
+    pub total_bytes_written: u32,
+}
+
+/// `SMB2_SRV_COPYCHUNK_RESUME_KEY_SIZE` (`smb2.h:350`).
+pub const SMB2_SRV_COPYCHUNK_RESUME_KEY_SIZE: usize = 24;
+
+/// `SMB2_FSCTL_SRV_COPYCHUNK` (`smb2.h:1017`).
+pub const SMB2_FSCTL_SRV_COPYCHUNK: u32 = 0x0014_40F2;
+
+/// `SMB2_FSCTL_SRV_COPYCHUNK_WRITE` (`smb2.h:1021`).
+///
+/// The variant for a destination opened for **writing only**, which is what a
+/// copy destination is. It is not interchangeable with the plain code: Samba
+/// answers the plain one with `STATUS_ACCESS_DENIED` when the destination
+/// handle lacks `FILE_READ_DATA`, and a handle opened `O_WRONLY` never has it
+/// (libsmb2 requests `FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES`
+/// and nothing else). Verified against Samba 4.23 by its own log:
+/// `fsctl_srv_copychunk_vfs_done: copy chunk failed [NT_STATUS_ACCESS_DENIED]`.
+pub const SMB2_FSCTL_SRV_COPYCHUNK_WRITE: u32 = 0x0014_80F2;
+
+// `SMB2_STATUS_*` codes the server-side copy needs to tell apart
+// (`smb2-errors.h`). Three of them mean "this server will not do it" and one
+// means "not that much at a time", which is a retry rather than a fallback.
+
+/// `SMB2_STATUS_NOT_SUPPORTED` (`smb2-errors.h:227`) — the plain refusal.
+pub const SMB2_STATUS_NOT_SUPPORTED: u32 = 0xC000_00BB;
+/// `SMB2_STATUS_INVALID_DEVICE_REQUEST` (`smb2-errors.h:56`) — what Windows
+/// servers answer for a filesystem control they do not implement.
+pub const SMB2_STATUS_INVALID_DEVICE_REQUEST: u32 = 0xC000_0010;
+/// `SMB2_STATUS_CTL_FILE_NOT_SUPPORTED` (`smb2-errors.h:127`).
+pub const SMB2_STATUS_CTL_FILE_NOT_SUPPORTED: u32 = 0xC000_0057;
+/// `SMB2_STATUS_INVALID_PARAMETER` (`smb2-errors.h:53`) — carries the server's
+/// limits when a copy asked for too much.
+pub const SMB2_STATUS_INVALID_PARAMETER: u32 = 0xC000_000D;
+
 // ---------------------------------------------------------------------------
 // Layout assertions
 // ---------------------------------------------------------------------------
@@ -142,6 +207,25 @@ const _: () = {
     assert!(align_of::<smb2dirent>() == 8, "smb2dirent alignment changed");
     assert!(offset_of!(smb2dirent, name) == 0);
     assert!(offset_of!(smb2dirent, st) == 8);
+
+    // The copychunk structs are all fixed-width fields with no padding
+    // involved: a 24-byte opaque key, two 64-bit offsets followed by two 32-bit
+    // fields, and three 32-bit counters.
+    assert!(size_of::<smb2_srv_copychunk_resume_key>() == 24, "resume key size changed");
+    assert!(align_of::<smb2_srv_copychunk_resume_key>() == 1);
+
+    assert!(size_of::<smb2_srv_copychunk>() == 24, "copychunk size changed");
+    assert!(align_of::<smb2_srv_copychunk>() == 8);
+    assert!(offset_of!(smb2_srv_copychunk, source_offset) == 0);
+    assert!(offset_of!(smb2_srv_copychunk, target_offset) == 8);
+    assert!(offset_of!(smb2_srv_copychunk, length) == 16);
+    assert!(offset_of!(smb2_srv_copychunk, reserved) == 20);
+
+    assert!(size_of::<smb2_srv_copychunk_reply>() == 12, "copychunk reply size changed");
+    assert!(align_of::<smb2_srv_copychunk_reply>() == 4);
+    assert!(offset_of!(smb2_srv_copychunk_reply, chunks_written) == 0);
+    assert!(offset_of!(smb2_srv_copychunk_reply, chunk_bytes_written) == 4);
+    assert!(offset_of!(smb2_srv_copychunk_reply, total_bytes_written) == 8);
 };
 
 // ---------------------------------------------------------------------------
@@ -326,6 +410,37 @@ unsafe extern "C" {
     ) -> c_int;
     pub fn smb2_mkdir(smb2: *mut smb2_context, path: *const c_char) -> c_int;
     pub fn smb2_rmdir(smb2: *mut smb2_context, path: *const c_char) -> c_int;
+
+    // -- server-side copy (libsmb2.h:1375, :1405; sync.c:922, :960) --------
+    //
+    // Both of these have a synchronous form, which is the only kind declared
+    // here — see the module docs on why the async API is left out. The async
+    // copychunk is the one libsmb2 documents more prominently, so it is worth
+    // saying plainly: `smb2_copychunk` is a real function in `lib/sync.c`, not
+    // a wrapper this file invented.
+
+    /// Ask the server for a key identifying `fh`, for use as a copy source.
+    pub fn smb2_request_resume_key(
+        smb2: *mut smb2_context,
+        fh: *mut smb2fh,
+        resume_key: *mut smb2_srv_copychunk_resume_key,
+    ) -> c_int;
+
+    /// Copy ranges from a source identified by `resume_key` into `dstfh`,
+    /// **without the bytes passing through this process**.
+    ///
+    /// [`reply`](smb2_srv_copychunk_reply) is written by libsmb2 before it
+    /// returns, including on the error that reports the server's limits, so the
+    /// caller keeps ownership of the struct and has nothing to free.
+    pub fn smb2_copychunk(
+        smb2: *mut smb2_context,
+        ctl_code: u32,
+        resume_key: *const smb2_srv_copychunk_resume_key,
+        dstfh: *mut smb2fh,
+        chunks: *const smb2_srv_copychunk,
+        chunk_count: u32,
+        reply: *mut smb2_srv_copychunk_reply,
+    ) -> c_int;
 
     // -- errors (libsmb2.h:1700-1730) --------------------------------------
 

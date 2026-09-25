@@ -206,6 +206,12 @@ enum Command {
         to: VfsPath,
         reply: oneshot::Sender<Result<()>>,
     },
+    Copy {
+        from: VfsPath,
+        to: VfsPath,
+        /// Bytes copied.
+        reply: oneshot::Sender<Result<u64>>,
+    },
     Open {
         path: VfsPath,
         mode: OpenMode,
@@ -365,6 +371,16 @@ impl Session {
         .await
     }
 
+    /// Copy one file. Returns the bytes copied.
+    pub(crate) async fn copy(&self, from: &VfsPath, to: &VfsPath) -> Result<u64> {
+        self.call(|reply| Command::Copy {
+            from: from.clone(),
+            to: to.clone(),
+            reply,
+        })
+        .await
+    }
+
     /// Open a file, returning a handle whose lifetime is tied to this session.
     pub(crate) async fn open(&self, path: &VfsPath, mode: OpenMode) -> Result<RemoteFile> {
         let (id, len) = self
@@ -498,6 +514,9 @@ fn actor_thread(
             }
             Command::Rename { from, to, reply } => {
                 let _ = reply.send(rename(&ctx, &from, &to));
+            }
+            Command::Copy { from, to, reply } => {
+                let _ = reply.send(copy_file(&ctx, &from, &to));
             }
             Command::Open { path, mode, reply } => {
                 let _ = reply.send(open(&ctx, &mut files, &path, mode));
@@ -646,6 +665,263 @@ fn rename(ctx: &SmbContext, from: &VfsPath, to: &VfsPath) -> Result<()> {
         return Err(ctx.error(rc, from));
     }
     Ok(())
+}
+
+/// A file handle closed when it goes out of scope.
+///
+/// A copy holds two handles and has several ways to fail between opening them,
+/// so closing them by hand at each exit would eventually miss one — and a
+/// leaked handle on the server is not something the caller can see or fix.
+struct FhGuard<'a> {
+    ctx: &'a SmbContext,
+    fh: *mut ffi::smb2fh,
+}
+
+impl Drop for FhGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from `smb2_open` on this thread, and the
+        // guard owns it so this is its only close.
+        unsafe { ffi::smb2_close(self.ctx.ptr(), self.fh) };
+    }
+}
+
+/// Initial per-request copy size.
+///
+/// The server gets to lower this; see [`copy_server_side`]. 1 MiB is the
+/// transfer size the rest of the kernel already uses, so it is the obvious
+/// first guess.
+const COPY_CHUNK_BYTES: u32 = 1024 * 1024;
+
+/// Copy a single file.
+///
+/// **Server-side, so the bytes never pass through this process.** SMB has a
+/// filesystem control for exactly this: the source's *resume key* identifies it,
+/// and a COPYCHUNK request tells the server to move ranges between its own
+/// handles. A client-side loop would put a multi-gigabyte film across the
+/// network twice — once down, once back up — which on Wi-Fi is the difference
+/// between seconds and minutes.
+///
+/// Not every server implements it, so this falls back to reading and writing
+/// through this process. The fallback is deliberately invisible above this
+/// layer: the caller asked for a copy, not for a particular way of doing one.
+///
+/// Directories are not copied. Recursion is the caller's job, for the same
+/// reason [`remove_dir`] refuses a non-empty directory — see the core crate's
+/// documentation on keeping error handling visible at the call site.
+fn copy_file(ctx: &SmbContext, from: &VfsPath, to: &VfsPath) -> Result<u64> {
+    let smb_from = cstring(&to_smb_path(from))?;
+    let smb_to = cstring(&to_smb_path(to))?;
+
+    // SAFETY: both C strings outlive the calls; the handles are closed by the
+    // guards on every path out of this function.
+    unsafe {
+        let src = ffi::smb2_open(ctx.ptr(), smb_from.as_ptr(), ffi::open_flags::O_RDONLY);
+        if src.is_null() {
+            return Err(ctx.error(0, from));
+        }
+        let src = FhGuard { ctx, fh: src };
+
+        let mut st = ffi::smb2_stat_64::default();
+        let size = if ffi::smb2_fstat(ctx.ptr(), src.fh, &mut st) == 0 {
+            st.smb2_size
+        } else {
+            0
+        };
+
+        // `O_EXCL` rather than overwriting: a copy that silently replaced an
+        // existing film would be the worst kind of surprise, and the caller can
+        // see this error and decide what to do about it.
+        let flags = ffi::open_flags::O_WRONLY | ffi::open_flags::O_CREAT | ffi::open_flags::O_EXCL;
+        let dst = ffi::smb2_open(ctx.ptr(), smb_to.as_ptr(), flags);
+        if dst.is_null() {
+            return Err(ctx.error(0, to));
+        }
+        let dst = FhGuard { ctx, fh: dst };
+
+        if size == 0 {
+            // An empty source still means "create the destination", which the
+            // open above has already done.
+            return Ok(0);
+        }
+
+        match copy_server_side(ctx, src.fh, dst.fh, size) {
+            Ok(copied) => Ok(copied),
+            Err(CopyFailed::Unsupported) => {
+                // Worth saying out loud, because the difference between the two
+                // paths is orders of magnitude on a large film and nothing else
+                // in the result would reveal which one ran.
+                if std::env::var_os("KRYSTALLOS_DEBUG").is_some() {
+                    eprintln!("krystallos: {to}: server-side copy unsupported, moving the bytes");
+                }
+                copy_through_here(ctx, src.fh, dst.fh, size)
+            }
+            Err(CopyFailed::Error(e)) => Err(e),
+        }
+    }
+}
+
+/// Why a server-side copy did not finish.
+enum CopyFailed {
+    /// The server does not implement COPYCHUNK, so the bytes have to move.
+    Unsupported,
+    /// Something else went wrong, and moving the bytes would not help.
+    Error(Error),
+}
+
+/// Ask the server to copy [size] bytes from `src` to `dst`.
+///
+/// # The limit negotiation
+///
+/// A server has its own maximum chunk size, and the client is expected to find
+/// it by asking for too much: the refusal comes back as an error *with the
+/// limits filled into the same reply struct* that a success uses. That is why
+/// the reply is inspected on the error path here rather than discarded — and
+/// why the adopted limit is only ever accepted when it is **smaller** than what
+/// was just tried, which is what stops a server that answers every request with
+/// an error from becoming an infinite loop.
+///
+/// # Safety
+///
+/// `src` and `dst` must be handles open on `ctx`, on this thread.
+unsafe fn copy_server_side(
+    ctx: &SmbContext,
+    src: *mut ffi::smb2fh,
+    dst: *mut ffi::smb2fh,
+    size: u64,
+) -> std::result::Result<u64, CopyFailed> {
+    let mut key = ffi::smb2_srv_copychunk_resume_key {
+        resume_key: [0; ffi::SMB2_SRV_COPYCHUNK_RESUME_KEY_SIZE],
+    };
+    // SAFETY: the caller guarantees both handles are open on this context.
+    let rc = unsafe { ffi::smb2_request_resume_key(ctx.ptr(), src, &mut key) };
+    if rc != 0 {
+        return Err(classify_copy_failure(ctx, rc));
+    }
+
+    let mut chunk_bytes = COPY_CHUNK_BYTES;
+    let mut offset = 0u64;
+    while offset < size {
+        let length = chunk_bytes.min((size - offset).min(u32::MAX as u64) as u32);
+        let chunk = ffi::smb2_srv_copychunk {
+            source_offset: offset,
+            target_offset: offset,
+            length,
+            reserved: 0,
+        };
+        let mut reply = ffi::smb2_srv_copychunk_reply::default();
+        // SAFETY: as above; `key` and `chunk` outlive the call, and `reply` is
+        // written by libsmb2 and stayed owned here.
+        let rc = unsafe {
+            ffi::smb2_copychunk(
+                ctx.ptr(),
+                ffi::SMB2_FSCTL_SRV_COPYCHUNK_WRITE,
+                &key,
+                dst,
+                &chunk,
+                1,
+                &mut reply,
+            )
+        };
+
+        if rc == 0 {
+            let written = u64::from(reply.total_bytes_written);
+            if written == 0 {
+                // A success that moved nothing would loop forever. The server
+                // is misbehaving; report it rather than spinning.
+                return Err(CopyFailed::Error(Error::backend(
+                    "the server reported a copy of zero bytes",
+                )));
+            }
+            offset += written;
+            continue;
+        }
+
+        // An error carrying a usable limit means "not that much at a time".
+        let limit = reply.chunk_bytes_written;
+        if limit > 0 && limit < chunk_bytes {
+            chunk_bytes = limit;
+            continue;
+        }
+        return Err(classify_copy_failure(ctx, rc));
+    }
+    Ok(offset)
+}
+
+/// Whether a status means "this server does not do server-side copies".
+///
+/// Split out from the classification below so it can be tested without a
+/// server: the three codes are the ones Windows and Samba use for a filesystem
+/// control they do not implement, and treating one of them as a hard failure
+/// would break copying against those servers entirely.
+fn is_copy_unsupported(status: u32) -> bool {
+    matches!(
+        status,
+        ffi::SMB2_STATUS_NOT_SUPPORTED
+            | ffi::SMB2_STATUS_INVALID_DEVICE_REQUEST
+            | ffi::SMB2_STATUS_CTL_FILE_NOT_SUPPORTED
+    )
+}
+
+/// Decide whether a failed copy is worth retrying without the server's help.
+fn classify_copy_failure(ctx: &SmbContext, rc: i32) -> CopyFailed {
+    // SAFETY: a read-only query on a live context.
+    let status = unsafe { ffi::smb2_get_nterror(ctx.ptr()) } as u32;
+    if is_copy_unsupported(status) {
+        return CopyFailed::Unsupported;
+    }
+    CopyFailed::Error(ctx.error(rc, "copy"))
+}
+
+/// The fallback: read the source and write the destination from this process.
+///
+/// Slower by orders of magnitude on a large file, since every byte crosses the
+/// network twice. It exists so that a server without COPYCHUNK still gets a
+/// working copy rather than an error.
+///
+/// # Safety
+///
+/// `src` and `dst` must be handles open on `ctx`, on this thread, and `dst` must
+/// be empty — this writes from offset zero and does not truncate.
+unsafe fn copy_through_here(
+    ctx: &SmbContext,
+    src: *mut ffi::smb2fh,
+    dst: *mut ffi::smb2fh,
+    size: u64,
+) -> Result<u64> {
+    let mut buf = vec![0u8; COPY_CHUNK_BYTES as usize];
+    let mut offset = 0u64;
+    while offset < size {
+        let want = (size - offset).min(buf.len() as u64) as u32;
+        // SAFETY: the caller guarantees both handles are open on this context,
+        // and `buf` is uniquely borrowed here.
+        let read = unsafe { ffi::smb2_pread(ctx.ptr(), src, buf.as_mut_ptr(), want, offset) };
+        if read < 0 {
+            return Err(ctx.error(read, "copy (read)"));
+        }
+        if read == 0 {
+            // The source shrank under us. Whatever was copied is all there is.
+            break;
+        }
+        let mut written = 0i32;
+        while written < read {
+            // SAFETY: as above; the offset is inside `buf`.
+            let n = unsafe {
+                ffi::smb2_pwrite(
+                    ctx.ptr(),
+                    dst,
+                    buf.as_ptr().add(written as usize),
+                    (read - written) as u32,
+                    offset + written as u64,
+                )
+            };
+            if n <= 0 {
+                return Err(ctx.error(n, "copy (write)"));
+            }
+            written += n;
+        }
+        offset += read as u64;
+    }
+    Ok(offset)
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,6 +1287,34 @@ mod tests {
         drop(file);
 
         assert_eq!(responder.join().unwrap(), 1, "close then drop must close once");
+    }
+
+    #[test]
+    fn a_server_that_cannot_copy_server_side_is_recognised() {
+        // What Windows and Samba answer for a filesystem control they do not
+        // implement. Missing one means copying against such a server fails
+        // outright instead of falling back to moving the bytes.
+        for status in [
+            ffi::SMB2_STATUS_NOT_SUPPORTED,
+            ffi::SMB2_STATUS_INVALID_DEVICE_REQUEST,
+            ffi::SMB2_STATUS_CTL_FILE_NOT_SUPPORTED,
+        ] {
+            assert!(is_copy_unsupported(status), "{status:#x} should fall back");
+        }
+    }
+
+    #[test]
+    fn other_failures_do_not_fall_back() {
+        // Falling back on these would push a multi-gigabyte film through this
+        // process to fix an error that moving bytes cannot fix — a permission
+        // failure, or a name that is already taken.
+        for status in [
+            ffi::SMB2_STATUS_INVALID_PARAMETER,
+            0xC000_0034, // STATUS_OBJECT_NAME_NOT_FOUND
+            0xDEAD_BEEF,
+        ] {
+            assert!(!is_copy_unsupported(status), "{status:#x} should not fall back");
+        }
     }
 
     #[test]

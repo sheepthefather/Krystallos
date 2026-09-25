@@ -236,6 +236,22 @@ impl Session {
         Ok(self.backend.rename(&from, &to).await?)
     }
 
+    /// Copy one file, returning the bytes copied.
+    ///
+    /// **One file, not a tree** — recursing into a directory is the caller's
+    /// job, so that it can report which part of a large copy failed instead of
+    /// getting one opaque error.
+    ///
+    /// **Fails if the destination exists**, rather than replacing it. Callers
+    /// should check first and ask the user; a paste that silently overwrote a
+    /// film would be data loss.
+    pub async fn copy(&self, from: String, to: String) -> Result<u64> {
+        self.ensure_open()?;
+        let from = self.path(&from)?;
+        let to = self.path(&to)?;
+        Ok(self.backend.copy(&from, &to).await?)
+    }
+
     /// Open a file.
     ///
     /// The returned handle is only valid while this session is open; closing

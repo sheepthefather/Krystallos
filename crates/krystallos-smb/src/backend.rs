@@ -136,6 +136,10 @@ impl StorageBackend for SmbBackend {
         self.session.rename(from, to).await
     }
 
+    async fn copy(&self, from: &VfsPath, to: &VfsPath) -> Result<u64> {
+        self.session.copy(from, to).await
+    }
+
     async fn mkdir(&self, path: &VfsPath) -> Result<()> {
         self.session.mkdir(path).await
     }

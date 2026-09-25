@@ -202,6 +202,22 @@ impl StorageBackend for LocalBackend {
         std::fs::rename(self.resolve(from), self.resolve(to)).map_err(|e| map_io(e, from))
     }
 
+    async fn copy(&self, from: &VfsPath, to: &VfsPath) -> Result<u64> {
+        // The source is opened first: opening the destination creates it, and a
+        // missing source would then leave an empty file behind.
+        let mut input = std::fs::File::open(self.resolve(from)).map_err(|e| map_io(e, from))?;
+        // `create_new` rather than `std::fs::copy`, which replaces an existing
+        // destination. Refusing to overwrite is the rule the SMB backend
+        // follows too, and for the same reason: replacing a film is a decision
+        // the caller has to make visibly.
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.resolve(to))
+            .map_err(|e| map_io(e, to))?;
+        std::io::copy(&mut input, &mut out).map_err(|e| map_io(e, to))
+    }
+
     async fn mkdir(&self, path: &VfsPath) -> Result<()> {
         // `create_dir`, not `create_dir_all`: a missing parent should surface
         // as an error rather than silently building a tree the caller did not
