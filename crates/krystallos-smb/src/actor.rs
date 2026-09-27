@@ -1156,12 +1156,27 @@ fn metadata_from_stat(st: &ffi::smb2_stat_64) -> Metadata {
     }
 }
 
-/// Convert a libsmb2 timestamp, treating zero as "not reported".
+/// Convert a libsmb2 timestamp, treating "not reported" as absent.
 ///
-/// SMB reports unset timestamps as zero, which would otherwise render as 1970
-/// and look like a real — if implausible — answer.
+/// Two different encodings mean that, and both have to be caught.
+///
+/// **Zero seconds** is the Unix epoch, which would render as 1970 — a real if
+/// implausible answer.
+///
+/// **The far future** is what the protocol's own silence becomes. SMB says "no
+/// timestamp" with `FILETIME 0`, and `smb2_win_to_timeval` subtracts the Windows
+/// epoch from a `uint64_t`: the subtraction wraps, and the result is about
+/// 1.83e12 seconds — the year 60056. libsmb2 has no guard for it (read
+/// `timestamps.c` and its callers), and neither does the FFI's `to_millis`,
+/// because the wrapped value is nowhere near overflowing. It would arrive as a
+/// plausible-looking date and sort among real ones.
+///
+/// The bound below is the year 3000. Nothing has a timestamp there, and the
+/// wrapped value is far past it.
 fn timestamp(secs: u64, nsecs: u64) -> Option<SystemTime> {
-    if secs == 0 {
+    /// 3000-01-01T00:00:00Z, in seconds since the Unix epoch.
+    const YEAR_3000: u64 = 32_503_680_000;
+    if secs == 0 || secs > YEAR_3000 {
         return None;
     }
     // `Duration::new` panics above 10^9 nanoseconds. A server sending a
@@ -1182,6 +1197,17 @@ mod tests {
     fn timestamps_treat_zero_as_absent() {
         assert!(timestamp(0, 0).is_none());
         assert!(timestamp(0, 123).is_none());
+    }
+
+    #[test]
+    fn timestamps_in_the_far_future_are_absent() {
+        // What libsmb2 makes of the protocol's "no timestamp": FILETIME 0 minus
+        // the Windows epoch, wrapped through a uint64_t and divided down. Not a
+        // number anyone chose — it is 0 - 116444736000000000 unsigned.
+        assert!(timestamp(1_833_029_933_770, 0).is_none());
+        // And the bound itself is past the epoch's every plausible neighbour.
+        assert!(timestamp(32_503_680_000, 0).is_some());
+        assert!(timestamp(32_503_680_001, 0).is_none());
     }
 
     #[test]
